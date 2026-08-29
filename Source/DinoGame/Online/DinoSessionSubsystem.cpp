@@ -4,6 +4,7 @@
 #include "Engine/GameInstance.h"
 #include "Engine/NetDriver.h"
 #include "Engine/World.h"
+#include "GameFramework/GameModeBase.h"
 #include "GameFramework/PlayerController.h"
 #include "Online/OnlineSessionNames.h"
 #include "OnlineSubsystem.h"
@@ -43,14 +44,14 @@ void UDinoSessionSubsystem::HostSession(const FString& MapName, int32 MaxPlayers
 
 	if (Sessions->GetNamedSession(NAME_GameSession) != nullptr)
 	{
-		bDestroyingToRehost = true;
+		PendingAction = EPendingAction::Rehost;
 		DestroyHandle = Sessions->AddOnDestroySessionCompleteDelegate_Handle(
 			FOnDestroySessionCompleteDelegate::CreateUObject(this, &UDinoSessionSubsystem::HandleDestroyComplete));
 
 		if (!Sessions->DestroySession(NAME_GameSession))
 		{
 			Sessions->ClearOnDestroySessionCompleteDelegate_Handle(DestroyHandle);
-			bDestroyingToRehost = false;
+			PendingAction = EPendingAction::None;
 			OnHostComplete.Broadcast(false);
 		}
 		return;
@@ -116,6 +117,17 @@ void UDinoSessionSubsystem::HandleCreateComplete(FName SessionName, bool bWasSuc
 	}
 
 	UE_LOG(LogDinoNet, Log, TEXT("Session created. Travelling to %s as listen server."), *PendingMapName);
+
+	// Seamless travel cannot promote a Standalone game into a listen server: it deliberately
+	// reuses the existing network context, and in doing so drops the "?listen" option, leaving
+	// the game standalone with no net driver. The initial host transition therefore has to be a
+	// hard travel. Clearing the flag on the outgoing GameMode is enough — a hard travel destroys
+	// it, and ADinoGameMode's constructor sets bUseSeamlessTravel back to true on the new
+	// instance, so later in-session map changes stay seamless.
+	if (AGameModeBase* GameMode = World->GetAuthGameMode())
+	{
+		GameMode->bUseSeamlessTravel = false;
+	}
 
 	OnHostComplete.Broadcast(true);
 	World->ServerTravel(FString::Printf(TEXT("%s?listen"), *PendingMapName));
@@ -200,6 +212,41 @@ void UDinoSessionSubsystem::JoinFoundSession(int32 SessionIndex)
 		return;
 	}
 
+	// Anything left registered under NAME_GameSession — a session this player hosted, or one a
+	// half-finished join left behind — makes JoinSession fail with AlreadyInSession. Clear it
+	// first, using the same destroy-then-retry cycle the host path uses.
+	if (Sessions->GetNamedSession(NAME_GameSession) != nullptr)
+	{
+		UE_LOG(LogDinoNet, Log, TEXT("Leaving the current session before joining."));
+
+		PendingAction = EPendingAction::Join;
+		PendingJoinIndex = SessionIndex;
+
+		DestroyHandle = Sessions->AddOnDestroySessionCompleteDelegate_Handle(
+			FOnDestroySessionCompleteDelegate::CreateUObject(this, &UDinoSessionSubsystem::HandleDestroyComplete));
+
+		if (!Sessions->DestroySession(NAME_GameSession))
+		{
+			Sessions->ClearOnDestroySessionCompleteDelegate_Handle(DestroyHandle);
+			PendingAction = EPendingAction::None;
+			PendingJoinIndex = INDEX_NONE;
+			OnJoinComplete.Broadcast(false);
+		}
+		return;
+	}
+
+	JoinSessionNow(SessionIndex);
+}
+
+void UDinoSessionSubsystem::JoinSessionNow(int32 SessionIndex)
+{
+	const IOnlineSessionPtr Sessions = GetSessions();
+	if (!Sessions.IsValid() || !Search.IsValid() || !Search->SearchResults.IsValidIndex(SessionIndex))
+	{
+		OnJoinComplete.Broadcast(false);
+		return;
+	}
+
 	JoinHandle = Sessions->AddOnJoinSessionCompleteDelegate_Handle(
 		FOnJoinSessionCompleteDelegate::CreateUObject(this, &UDinoSessionSubsystem::HandleJoinComplete));
 
@@ -229,7 +276,14 @@ void UDinoSessionSubsystem::HandleJoinComplete(FName SessionName, EOnJoinSession
 	APlayerController* PlayerController = GetGameInstance() ? GetGameInstance()->GetFirstLocalPlayerController() : nullptr;
 	if (!PlayerController || !Sessions->GetResolvedConnectString(SessionName, ConnectString))
 	{
-		UE_LOG(LogDinoNet, Error, TEXT("Joined %s but could not resolve a connect string."), *SessionName.ToString());
+		// The join itself succeeded, so the session is registered even though there is no way to
+		// travel into it. Leaving it registered would block every later join with
+		// AlreadyInSession, so tear it down rather than stranding the player.
+		UE_LOG(LogDinoNet, Error,
+			TEXT("Joined %s but could not resolve a connect string. Leaving it so later joins are not blocked."),
+			*SessionName.ToString());
+
+		Sessions->DestroySession(NAME_GameSession);
 		OnJoinComplete.Broadcast(false);
 		return;
 	}
@@ -249,7 +303,7 @@ void UDinoSessionSubsystem::LeaveSession()
 		return;
 	}
 
-	bDestroyingToRehost = false;
+	PendingAction = EPendingAction::None;
 	DestroyHandle = Sessions->AddOnDestroySessionCompleteDelegate_Handle(
 		FOnDestroySessionCompleteDelegate::CreateUObject(this, &UDinoSessionSubsystem::HandleDestroyComplete));
 
@@ -267,16 +321,37 @@ void UDinoSessionSubsystem::HandleDestroyComplete(FName SessionName, bool bWasSu
 		Sessions->ClearOnDestroySessionCompleteDelegate_Handle(DestroyHandle);
 	}
 
-	if (bDestroyingToRehost)
+	// Consume the pending action before acting on it, so a failure inside the retry cannot leave
+	// the subsystem primed to retry again on the next destroy.
+	const EPendingAction Action = PendingAction;
+	const int32 JoinIndex = PendingJoinIndex;
+	PendingAction = EPendingAction::None;
+	PendingJoinIndex = INDEX_NONE;
+
+	if (Action == EPendingAction::Rehost)
 	{
-		bDestroyingToRehost = false;
 		if (bWasSuccessful)
 		{
 			CreateSessionNow();
 		}
 		else
 		{
+			UE_LOG(LogDinoNet, Error, TEXT("Could not clear the previous session, so hosting was abandoned."));
 			OnHostComplete.Broadcast(false);
+		}
+		return;
+	}
+
+	if (Action == EPendingAction::Join)
+	{
+		if (bWasSuccessful)
+		{
+			JoinSessionNow(JoinIndex);
+		}
+		else
+		{
+			UE_LOG(LogDinoNet, Error, TEXT("Could not leave the previous session, so joining was abandoned."));
+			OnJoinComplete.Broadcast(false);
 		}
 		return;
 	}
@@ -288,10 +363,11 @@ void UDinoSessionSubsystem::HandleDestroyComplete(FName SessionName, bool bWasSu
 }
 
 // --- Console scaffolding ---------------------------------------------------------------------
-// See the header for why these live here. Delete this block and the matching UFUNCTION(Exec)
-// declarations together once a real join UI exists.
+// Implementations only; the exec entry points are on ADinoPlayerController. See the header for
+// why. Delete this block, those exec functions, and their forwarders together once a real join
+// UI exists.
 
-void UDinoSessionSubsystem::DinoHost(const FString& MapName, int32 MaxPlayers)
+void UDinoSessionSubsystem::ConsoleHost(const FString& MapName, int32 MaxPlayers)
 {
 	FString ResolvedMap = MapName;
 	if (ResolvedMap.IsEmpty())
@@ -313,13 +389,13 @@ void UDinoSessionSubsystem::DinoHost(const FString& MapName, int32 MaxPlayers)
 	HostSession(ResolvedMap, Slots, false);
 }
 
-void UDinoSessionSubsystem::DinoFind()
+void UDinoSessionSubsystem::ConsoleFind()
 {
 	UE_LOG(LogDinoNet, Log, TEXT("DinoFind: searching (%s)..."), IsLANMode() ? TEXT("LAN") : TEXT("online"));
 	FindSessions(50);
 }
 
-void UDinoSessionSubsystem::DinoJoin(int32 SessionIndex)
+void UDinoSessionSubsystem::ConsoleJoin(int32 SessionIndex)
 {
 	if (!Search.IsValid())
 	{
@@ -338,13 +414,13 @@ void UDinoSessionSubsystem::DinoJoin(int32 SessionIndex)
 	JoinFoundSession(SessionIndex);
 }
 
-void UDinoSessionSubsystem::DinoLeave()
+void UDinoSessionSubsystem::ConsoleLeave()
 {
 	UE_LOG(LogDinoNet, Log, TEXT("DinoLeave: requested."));
 	LeaveSession();
 }
 
-void UDinoSessionSubsystem::DinoNetStatus()
+void UDinoSessionSubsystem::ConsoleNetStatus()
 {
 	const IOnlineSubsystem* Subsystem = IOnlineSubsystem::Get();
 	const UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;

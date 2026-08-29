@@ -1,8 +1,12 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Engine/Attenuation.h"
 #include "GameFramework/Character.h"
 #include "DinoCharacter.generated.h"
+
+class USoundAttenuation;
+class UVOIPTalker;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FDinoHealthChanged, float, NewHealth, float, Delta);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FDinoDied);
@@ -45,8 +49,55 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Dino|Health")
 	FDinoDied OnDied;
 
+	/** 0 while silent, rising with speech volume. Driven by the voice engine, not replicated. */
+	UFUNCTION(BlueprintPure, Category = "Dino|Voice")
+	float GetVoiceLevel() const;
+
 protected:
 	virtual void BeginPlay() override;
+	virtual void PossessedBy(AController* NewController) override;
+	virtual void OnRep_PlayerState() override;
+
+	/**
+	 * This player's voice source. A UActorComponent, not a scene component — it carries no
+	 * transform of its own. Spatialisation comes later from Settings.ComponentToAttachTo plus a
+	 * USoundAttenuation asset; while both are null the voice plays unspatialised, which is what
+	 * phase 1 wants.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Dino|Voice")
+	TObjectPtr<UVOIPTalker> VoipTalker;
+
+	/**
+	 * Optional hand-tuned attenuation asset. Leave null and a sensible one is built in code from
+	 * the values below — assign an asset here only once tuning falloff by ear is worth doing in
+	 * the editor rather than in C++.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Voice")
+	TObjectPtr<USoundAttenuation> VoiceAttenuation;
+
+	/** Centimetres of full-volume radius before falloff begins. 100 uu = 1 m. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Voice", meta = (ClampMin = "0.0"))
+	float VoiceInnerRadius = 500.0f;
+
+	/** Centimetres beyond the inner radius over which the voice falls away to silence. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Voice", meta = (ClampMin = "1.0"))
+	float VoiceFalloffDistance = 3000.0f;
+
+	/**
+	 * How volume maps to distance. Linear is the predictable one: audible range really is
+	 * InnerRadius + FalloffDistance. NaturalSound is more realistic but fades to dBAttenuationAtMax,
+	 * which is inaudible well before the stated distance — it reads as half the range you asked for.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Voice")
+	EAttenuationDistanceModel VoiceDistanceModel = EAttenuationDistanceModel::Linear;
+
+	/** Cutoff applied when geometry blocks the line to a speaker. Lower is more muffled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Voice", meta = (ClampMin = "20.0"))
+	float VoiceOcclusionLowPassHz = 300.0f;
+
+	/** Volume multiplier applied on top of the muffling when occluded. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Voice", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float VoiceOcclusionVolume = 0.35f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Health", meta = (ClampMin = "1.0"))
 	float MaxHealth = 100.0f;
@@ -59,4 +110,18 @@ protected:
 
 private:
 	void ApplyHealthChange(float OldHealth);
+
+	/**
+	 * Binds VoipTalker to this pawn's PlayerState. Called from both PossessedBy and
+	 * OnRep_PlayerState because the PlayerState arrives at different times on the server and on
+	 * clients, and registering against a null one silently does nothing.
+	 */
+	void RegisterVoiceTalker();
+
+	/** Returns the assigned asset, or lazily builds one from the tunables above. */
+	USoundAttenuation* ResolveVoiceAttenuation();
+
+	/** Holds the code-built attenuation so it is not garbage collected. */
+	UPROPERTY(Transient)
+	TObjectPtr<USoundAttenuation> RuntimeVoiceAttenuation;
 };

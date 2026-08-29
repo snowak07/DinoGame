@@ -1,6 +1,35 @@
+# --- Engine-generated. Regenerates locally, never committed. See docs/PIPELINE.md §2. ---
 Binaries/
 Intermediate/
 DerivedDataCache/
 Saved/
-.vs
+.vs/
+
+# --- IDE solution/project files ---
+# Unreal regenerates these from the .uproject and they contain machine-specific paths, so
+# committing them hands every teammate a spurious diff they didn't cause.
+*.sln
+*.slnx
+*.suo
+*.opendb
+*.VC.db
+
+# --- Cook and packaging artifacts ---
+# Today this is only Build/<Platform>/FileOpenOrder/*.log, which the cooker writes.
+# NOTE: if an app icon or splash screen is ever added under Build/<Platform>/Resources/,
+# those are real build inputs and must be committed — un-ignore them explicitly then.
+Build/
+
+# --- Packaged builds ---
+# These are archived outside the repo (H:\Unreal\Projects\Builds) and distributed via itch,
+# never through Git — see docs/PIPELINE.md §6. These entries are a guard in case someone
+# ever points -archivedirectory inside the project by mistake; a packaged build is ~2 GB of
+# derived artifacts and LFS history cannot be pruned server-side.
+/Builds/
+/Packaged/
+/Dist/
+
+# --- Claude Code ---
+# Local session state and personal settings. If the team ever wants shared tool
+# permissions, commit .claude/settings.json explicitly rather than un-ignoring the folder.
 .claude/

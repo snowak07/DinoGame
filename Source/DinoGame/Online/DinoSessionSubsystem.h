@@ -77,32 +77,32 @@ public:
 	FDinoSessionOpResult OnLeaveComplete;
 
 	// --- Console scaffolding ---------------------------------------------------------------
-	// Temporary, until the join model is decided and a real UI exists. Kept here rather than on
-	// the PlayerController so the whole debug surface disappears with one delete of this block.
-	// The console is unavailable in Shipping, so package Development to use these.
+	// TODO(join-ui): delete alongside ADinoPlayerController's exec functions once a real join UI
+	// exists. Temporary until the join model is decided.
+	//
+	// These are the implementations only. The UFUNCTION(Exec) entry points live on
+	// ADinoPlayerController because the in-game console does not route exec commands to
+	// GameInstance subsystems in a packaged build — declaring Exec here compiles and links
+	// cleanly but yields "Command not recognized" at runtime.
 
-	/** Hosts MapName, or the current map when omitted. MaxPlayers defaults to 4 when <= 0. */
-	UFUNCTION(Exec)
-	void DinoHost(const FString& MapName, int32 MaxPlayers);
+	/** Hosts MapName, or the current map when empty. MaxPlayers falls back to 4 when <= 0. */
+	void ConsoleHost(const FString& MapName, int32 MaxPlayers);
 
-	UFUNCTION(Exec)
-	void DinoFind();
+	void ConsoleFind();
 
-	/** Index comes from the list DinoFind prints to the log. */
-	UFUNCTION(Exec)
-	void DinoJoin(int32 SessionIndex);
+	/** Index comes from the list ConsoleFind prints to the log. */
+	void ConsoleJoin(int32 SessionIndex);
 
-	UFUNCTION(Exec)
-	void DinoLeave();
+	void ConsoleLeave();
 
 	/** Prints backend, net mode, and — the point of it — which net driver actually got used. */
-	UFUNCTION(Exec)
-	void DinoNetStatus();
+	void ConsoleNetStatus();
 
 private:
 	IOnlineSessionPtr GetSessions() const;
 
 	void CreateSessionNow();
+	void JoinSessionNow(int32 SessionIndex);
 
 	void HandleCreateComplete(FName SessionName, bool bWasSuccessful);
 	void HandleFindComplete(bool bWasSuccessful);
@@ -116,9 +116,18 @@ private:
 
 	TSharedPtr<FOnlineSessionSearch> Search;
 
-	/** Host request held across the destroy-then-create cycle used to clear a stale session. */
+	/** What HandleDestroyComplete should do once a stale session has been cleared. */
+	enum class EPendingAction : uint8
+	{
+		None,
+		Rehost,
+		Join,
+	};
+
+	/** Request held across the destroy-then-retry cycle used to clear a stale session. */
 	FString PendingMapName;
 	int32 PendingMaxPlayers = 0;
 	bool bPendingPrivate = false;
-	bool bDestroyingToRehost = false;
+	EPendingAction PendingAction = EPendingAction::None;
+	int32 PendingJoinIndex = INDEX_NONE;
 };
