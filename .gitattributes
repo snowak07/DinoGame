@@ -1,3 +1,26 @@
+# --- Line endings ------------------------------------------------------------------
+# Normalise text files to LF in the repository regardless of each machine's
+# core.autocrlf setting. Without this, a teammate whose Git is configured differently
+# commits whole-file diffs after changing one line, and nobody can review anything.
+#
+# This line MUST stay first. .gitattributes is last-match-wins, and `*` matches binary
+# assets too — a `* text=auto` placed below the LFS entries would override their `-text`
+# and start line-ending-converting .uasset files, which corrupts them.
+* text=auto
+
+# Parsed by cmd.exe, which has known quirks with LF-only labels and goto.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Must keep LF even when checked out on Windows.
+*.sh text eol=lf
+
+# --- Binary assets, tracked by Git LFS ----------------------------------------------
+# `-text` disables line-ending conversion entirely. This matters more than it looks: an
+# LFS pointer file is plain text, so `text=auto` above would otherwise normalise it.
+#
+# When UEGitPlugin is set up (see docs/PIPELINE.md §2 and §9), replace this block with
+# the plugin's reference .gitattributes and add the `lockable` flag to .uasset/.umap.
 *.uasset filter=lfs diff=lfs merge=lfs -text
 *.umap filter=lfs diff=lfs merge=lfs -text
 *.png filter=lfs diff=lfs merge=lfs -text
