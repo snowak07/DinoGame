@@ -1,7 +1,9 @@
 #include "DinoPlayerController.h"
 
+#include "DinoBuildInfo.h"
 #include "DinoCharacter.h"
 #include "DinoGame.h"
+#include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
 #include "GameFramework/GameStateBase.h"
@@ -9,6 +11,7 @@
 #include "Interfaces/VoiceInterface.h"
 #include "Online/DinoSessionSubsystem.h"
 #include "OnlineSubsystem.h"
+#include "UI/DinoJoinMenu.h"
 
 void ADinoPlayerController::BeginPlay()
 {
@@ -16,6 +19,44 @@ void ADinoPlayerController::BeginPlay()
 
 	// Covers the listen-server host and standalone, where no voice handshake happens.
 	EnableOpenMic();
+
+	if (IsLocalController())
+	{
+		UE_LOG(LogDinoGame, Log, TEXT("Build version: %s"), *UDinoBuildInfo::GetBuildVersion());
+		ShowBuildVersionOnScreen();
+	}
+}
+
+void ADinoPlayerController::ShowBuildVersionOnScreen()
+{
+	if (!GEngine)
+	{
+		return;
+	}
+
+	// A stable key so repeat calls replace the message rather than stacking copies.
+	static const int32 VersionMessageKey = 20260828;
+
+	// Effectively forever. AddOnScreenDebugMessage has no "never expire" value, and the
+	// message is cleared on level load anyway, so this only has to outlast one session.
+	static const float PersistentDuration = 1.0e9f;
+
+	const bool bStamped = UDinoBuildInfo::IsStampedBuild();
+	const FString Message = FString::Printf(TEXT("Build %s"), *UDinoBuildInfo::GetBuildVersion());
+
+	// Unstamped means an editor or hand-built copy, which tells a tester nothing useful about
+	// which package they are on — colour it differently so that is obvious at a glance.
+	GEngine->AddOnScreenDebugMessage(
+		VersionMessageKey,
+		PersistentDuration,
+		bStamped ? FColor::Silver : FColor::Orange,
+		Message);
+}
+
+void ADinoPlayerController::DinoBuildVersion()
+{
+	UE_LOG(LogDinoGame, Log, TEXT("Build version: %s"), *UDinoBuildInfo::GetBuildVersion());
+	ShowBuildVersionOnScreen();
 }
 
 void ADinoPlayerController::ClientVoiceHandshakeComplete()
@@ -35,6 +76,36 @@ void ADinoPlayerController::EnableOpenMic()
 	}
 
 	StartTalking();
+}
+
+void ADinoPlayerController::ToggleJoinMenu()
+{
+	if (!IsLocalController())
+	{
+		return;
+	}
+
+	if (JoinMenu && JoinMenu->IsInViewport())
+	{
+		JoinMenu->HideMenu();
+		return;
+	}
+
+	if (!JoinMenuClass)
+	{
+		DinoScreenError(TEXT("No join menu set. Assign JoinMenuClass on BP_FirstPersonPlayerController."));
+		return;
+	}
+
+	if (!JoinMenu)
+	{
+		JoinMenu = CreateWidget<UDinoJoinMenu>(this, JoinMenuClass);
+	}
+
+	if (JoinMenu)
+	{
+		JoinMenu->ShowMenu();
+	}
 }
 
 void ADinoPlayerController::AcknowledgePossession(APawn* NewPawn)
@@ -103,6 +174,34 @@ void ADinoPlayerController::DinoLeave()
 	}
 }
 
+void ADinoPlayerController::DinoMenu()
+{
+	ToggleJoinMenu();
+}
+
+void ADinoPlayerController::DinoCode()
+{
+	if (UDinoSessionSubsystem* Subsystem = GetSessionSubsystem())
+	{
+		const FString Code = Subsystem->GetCurrentJoinCode();
+		if (Code.IsEmpty())
+		{
+			DinoScreenError(TEXT("Not hosting, so there is no join code. Run DinoHost first."));
+			return;
+		}
+
+		DinoScreenLog(FString::Printf(TEXT("JOIN CODE: %s"), *Code), FColor::Yellow, 300.0f);
+	}
+}
+
+void ADinoPlayerController::DinoJoinCode(const FString& JoinCode)
+{
+	if (UDinoSessionSubsystem* Subsystem = GetSessionSubsystem())
+	{
+		Subsystem->JoinByCode(JoinCode);
+	}
+}
+
 void ADinoPlayerController::DinoNetStatus()
 {
 	if (UDinoSessionSubsystem* Subsystem = GetSessionSubsystem())
@@ -116,21 +215,23 @@ void ADinoPlayerController::DinoVoiceStatus()
 	bool bVoiceEnabled = false;
 	GConfig->GetBool(TEXT("Voice"), TEXT("bEnabled"), bVoiceEnabled, GEngineIni);
 
-	UE_LOG(LogDinoNet, Log, TEXT("--- Dino voice status ---"));
-	UE_LOG(LogDinoNet, Log, TEXT("  [Voice].bEnabled : %s"), bVoiceEnabled ? TEXT("true") : TEXT("false"));
+	const float StatusDuration = 60.0f;
+
+	DinoScreenLog(TEXT("--- Dino voice status ---"), FColor::Cyan, StatusDuration);
+	DinoScreenLog(FString::Printf(TEXT("  [Voice].bEnabled : %s"), bVoiceEnabled ? TEXT("true") : TEXT("false")), FColor::White, StatusDuration);
 
 	IOnlineSubsystem* Subsystem = IOnlineSubsystem::Get();
 	const IOnlineVoicePtr Voice = Subsystem ? Subsystem->GetVoiceInterface() : nullptr;
 	if (!Voice.IsValid())
 	{
 		// Almost always [Voice].bEnabled being false, or no online subsystem at all.
-		UE_LOG(LogDinoNet, Error, TEXT("  voice interface : <none> — voice is off or unavailable."));
+		DinoScreenError(TEXT("  voice interface : <none> - voice is off or unavailable."));
 		return;
 	}
 
-	UE_LOG(LogDinoNet, Log, TEXT("  local talkers   : %d"), Voice->GetNumLocalTalkers());
-	UE_LOG(LogDinoNet, Log, TEXT("  speaking now    : %s"), Voice->IsLocalPlayerTalking(0) ? TEXT("yes") : TEXT("no"));
-	UE_LOG(LogDinoNet, Log, TEXT("  headset present : %s"), Voice->IsHeadsetPresent(0) ? TEXT("yes") : TEXT("no"));
+	DinoScreenLog(FString::Printf(TEXT("  local talkers   : %d"), Voice->GetNumLocalTalkers()), FColor::White, StatusDuration);
+	DinoScreenLog(FString::Printf(TEXT("  speaking now    : %s"), Voice->IsLocalPlayerTalking(0) ? TEXT("yes") : TEXT("no")), FColor::White, StatusDuration);
+	DinoScreenLog(FString::Printf(TEXT("  headset present : %s"), Voice->IsHeadsetPresent(0) ? TEXT("yes") : TEXT("no")), FColor::White, StatusDuration);
 
 	// There is no remote-talker count on the interface, so walk the PlayerStates instead. This
 	// also distinguishes "peer is connected but silent" from "peer never registered", which a
@@ -138,7 +239,7 @@ void ADinoPlayerController::DinoVoiceStatus()
 	const AGameStateBase* GameState = GetWorld() ? GetWorld()->GetGameState() : nullptr;
 	if (GameState)
 	{
-		UE_LOG(LogDinoNet, Log, TEXT("  remote players  : %d"), GameState->PlayerArray.Num() - 1);
+		DinoScreenLog(FString::Printf(TEXT("  remote players  : %d"), GameState->PlayerArray.Num() - 1), FColor::White, StatusDuration);
 		for (const APlayerState* Other : GameState->PlayerArray)
 		{
 			if (!Other || Other == PlayerState)
@@ -148,21 +249,21 @@ void ADinoPlayerController::DinoVoiceStatus()
 
 			const FUniqueNetIdRepl& OtherId = Other->GetUniqueId();
 			const bool bTalking = OtherId.IsValid() && Voice->IsRemotePlayerTalking(*OtherId);
-			UE_LOG(LogDinoNet, Log, TEXT("    %-20s %s"), *Other->GetPlayerName(),
-				!OtherId.IsValid() ? TEXT("<no net id>") : (bTalking ? TEXT("talking") : TEXT("silent")));
+			DinoScreenLog(FString::Printf(TEXT("    %-20s %s"), *Other->GetPlayerName(),
+				!OtherId.IsValid() ? TEXT("<no net id>") : (bTalking ? TEXT("talking") : TEXT("silent"))), FColor::White, StatusDuration);
 		}
 	}
 
 	if (const ADinoCharacter* DinoPawn = Cast<ADinoCharacter>(GetPawn()))
 	{
-		UE_LOG(LogDinoNet, Log, TEXT("  our voice level : %.3f"), DinoPawn->GetVoiceLevel());
+		DinoScreenLog(FString::Printf(TEXT("  our voice level : %.3f"), DinoPawn->GetVoiceLevel()), FColor::White, StatusDuration);
 	}
 	else
 	{
-		UE_LOG(LogDinoNet, Log, TEXT("  our voice level : <no DinoCharacter possessed>"));
+		DinoScreenLog(TEXT("  our voice level : <no DinoCharacter possessed>"), FColor::White, StatusDuration);
 	}
 
-	// The engine's own dump: per-talker state, which is what tells you whether a remote player is
-	// registered but silent versus not registered at all.
+	// The engine's own dump stays log-only: it is dozens of lines and would bury everything
+	// above it on screen. Read it from Saved/Logs when the summary above is not enough.
 	UE_LOG(LogDinoNet, Log, TEXT("  engine dump:\n%s"), *Voice->GetVoiceDebugState());
 }

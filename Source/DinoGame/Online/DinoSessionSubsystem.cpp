@@ -1,5 +1,6 @@
 #include "Online/DinoSessionSubsystem.h"
 
+#include "DinoBuildInfo.h"
 #include "DinoGame.h"
 #include "Engine/GameInstance.h"
 #include "Engine/NetDriver.h"
@@ -9,6 +10,18 @@
 #include "Online/OnlineSessionNames.h"
 #include "OnlineSubsystem.h"
 #include "OnlineSubsystemNames.h"
+
+namespace
+{
+	// No 0/O and no 1/I/L. These codes are read aloud over voice chat and retyped from memory,
+	// and those are exactly the characters people get wrong. 31 symbols at 6 characters is
+	// still ~887 million combinations.
+	const TCHAR* JoinCodeAlphabet = TEXT("23456789ABCDEFGHJKMNPQRSTUVWXYZ");
+	const int32 JoinCodeLength = 6;
+
+	/** Session setting key the code is advertised under, and filtered on when joining. */
+	const FName SETTING_DINOJOINCODE(TEXT("DINOJOINCODE"));
+}
 
 IOnlineSessionPtr UDinoSessionSubsystem::GetSessions() const
 {
@@ -38,7 +51,23 @@ void UDinoSessionSubsystem::HostSession(const FString& MapName, int32 MaxPlayers
 		return;
 	}
 
-	PendingMapName = MapName;
+	// An empty map name means "whatever is already loaded". Resolving it here rather than in
+	// each caller means the menu and the console command cannot drift apart.
+	FString ResolvedMap = MapName;
+	if (ResolvedMap.IsEmpty())
+	{
+		const UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
+		ResolvedMap = World ? UWorld::RemovePIEPrefix(World->GetMapName()) : FString();
+	}
+
+	if (ResolvedMap.IsEmpty())
+	{
+		DinoScreenError(TEXT("Could not work out which map to host."));
+		OnHostComplete.Broadcast(false);
+		return;
+	}
+
+	PendingMapName = ResolvedMap;
 	PendingMaxPlayers = FMath::Max(1, MaxPlayers);
 	bPendingPrivate = bPrivate;
 
@@ -84,6 +113,11 @@ void UDinoSessionSubsystem::CreateSessionNow()
 	Settings.bUseLobbiesIfAvailable = true;
 	Settings.Set(SETTING_MAPNAME, PendingMapName, EOnlineDataAdvertisementType::ViaOnlineService);
 
+	// Advertised, not just stored: ViaOnlineService is what puts it in Steam lobby metadata,
+	// which is what lets a joiner filter on it without downloading the lobby list first.
+	CurrentJoinCode = GenerateJoinCode();
+	Settings.Set(SETTING_DINOJOINCODE, CurrentJoinCode, EOnlineDataAdvertisementType::ViaOnlineService);
+
 	CreateHandle = Sessions->AddOnCreateSessionCompleteDelegate_Handle(
 		FOnCreateSessionCompleteDelegate::CreateUObject(this, &UDinoSessionSubsystem::HandleCreateComplete));
 
@@ -104,7 +138,7 @@ void UDinoSessionSubsystem::HandleCreateComplete(FName SessionName, bool bWasSuc
 
 	if (!bWasSuccessful)
 	{
-		UE_LOG(LogDinoNet, Error, TEXT("Failed to create session %s."), *SessionName.ToString());
+		DinoScreenError(FString::Printf(TEXT("Failed to create session %s."), *SessionName.ToString()));
 		OnHostComplete.Broadcast(false);
 		return;
 	}
@@ -116,7 +150,10 @@ void UDinoSessionSubsystem::HandleCreateComplete(FName SessionName, bool bWasSuc
 		return;
 	}
 
-	UE_LOG(LogDinoNet, Log, TEXT("Session created. Travelling to %s as listen server."), *PendingMapName);
+	DinoScreenLog(FString::Printf(TEXT("Session created. Travelling to %s as listen server."), *PendingMapName), FColor::Green);
+	// Five minutes, because the host has to read this out to someone who may not be at their
+	// desk yet. GetCurrentJoinCode() is the version a menu should show.
+	DinoScreenLog(FString::Printf(TEXT("JOIN CODE: %s"), *CurrentJoinCode), FColor::Yellow, 300.0f);
 
 	// Seamless travel cannot promote a Standalone game into a listen server: it deliberately
 	// reuses the existing network context, and in doing so drops the "?listen" option, leaving
@@ -186,18 +223,48 @@ void UDinoSessionSubsystem::HandleFindComplete(bool bWasSuccessful)
 		}
 	}
 
+	// A JoinByCode search reports through OnJoinComplete rather than as a list: the player asked
+	// to join one specific session, not to browse. Consume the pending code first so an early
+	// return cannot leave it set for the next unrelated search.
+	if (!PendingJoinCode.IsEmpty())
+	{
+		const FString Code = PendingJoinCode;
+		PendingJoinCode.Reset();
+
+		if (!bWasSuccessful)
+		{
+			DinoScreenError(FString::Printf(TEXT("Search failed while looking for code %s."), *Code));
+			OnJoinComplete.Broadcast(false);
+			return;
+		}
+
+		if (Results.Num() == 0)
+		{
+			DinoScreenError(FString::Printf(TEXT("No session found with code %s. Check the code, and that the host is still hosting."), *Code));
+			OnJoinComplete.Broadcast(false);
+			return;
+		}
+
+		DinoScreenLog(FString::Printf(TEXT("Found code %s (host %s). Joining..."), *Code, *Results[0].HostName), FColor::Green);
+		JoinFoundSession(0);
+		return;
+	}
+
 	if (bWasSuccessful)
 	{
-		UE_LOG(LogDinoNet, Log, TEXT("Search complete: %d session(s)."), Results.Num());
+		// Long duration: this is a list the player has to read an index out of and then type.
+		DinoScreenLog(FString::Printf(TEXT("Search complete: %d session(s)."), Results.Num()), FColor::Green, 45.0f);
 		for (const FDinoSessionInfo& Info : Results)
 		{
-			UE_LOG(LogDinoNet, Log, TEXT("  [%d] host=%s map=%s players=%d/%d ping=%dms"),
-				Info.Index, *Info.HostName, *Info.MapName, Info.CurrentPlayers, Info.MaxPlayers, Info.PingMs);
+			DinoScreenLog(
+				FString::Printf(TEXT("  [%d] host=%s map=%s players=%d/%d ping=%dms"),
+					Info.Index, *Info.HostName, *Info.MapName, Info.CurrentPlayers, Info.MaxPlayers, Info.PingMs),
+				FColor::White, 45.0f);
 		}
 	}
 	else
 	{
-		UE_LOG(LogDinoNet, Error, TEXT("Session search failed."));
+		DinoScreenError(TEXT("Session search failed."));
 	}
 
 	OnFindComplete.Broadcast(bWasSuccessful, Results);
@@ -267,7 +334,7 @@ void UDinoSessionSubsystem::HandleJoinComplete(FName SessionName, EOnJoinSession
 
 	if (!Sessions.IsValid() || Result != EOnJoinSessionCompleteResult::Success)
 	{
-		UE_LOG(LogDinoNet, Error, TEXT("Join failed for %s (result %d)."), *SessionName.ToString(), static_cast<int32>(Result));
+		DinoScreenError(FString::Printf(TEXT("Join failed for %s (result %d)."), *SessionName.ToString(), static_cast<int32>(Result)));
 		OnJoinComplete.Broadcast(false);
 		return;
 	}
@@ -279,16 +346,16 @@ void UDinoSessionSubsystem::HandleJoinComplete(FName SessionName, EOnJoinSession
 		// The join itself succeeded, so the session is registered even though there is no way to
 		// travel into it. Leaving it registered would block every later join with
 		// AlreadyInSession, so tear it down rather than stranding the player.
-		UE_LOG(LogDinoNet, Error,
+		DinoScreenError(FString::Printf(
 			TEXT("Joined %s but could not resolve a connect string. Leaving it so later joins are not blocked."),
-			*SessionName.ToString());
+			*SessionName.ToString()));
 
 		Sessions->DestroySession(NAME_GameSession);
 		OnJoinComplete.Broadcast(false);
 		return;
 	}
 
-	UE_LOG(LogDinoNet, Log, TEXT("Joined %s. Travelling to %s."), *SessionName.ToString(), *ConnectString);
+	DinoScreenLog(FString::Printf(TEXT("Joined %s. Travelling to %s."), *SessionName.ToString(), *ConnectString), FColor::Green);
 
 	OnJoinComplete.Broadcast(true);
 	PlayerController->ClientTravel(ConnectString, TRAVEL_Absolute);
@@ -336,7 +403,7 @@ void UDinoSessionSubsystem::HandleDestroyComplete(FName SessionName, bool bWasSu
 		}
 		else
 		{
-			UE_LOG(LogDinoNet, Error, TEXT("Could not clear the previous session, so hosting was abandoned."));
+			DinoScreenError(TEXT("Could not clear the previous session, so hosting was abandoned."));
 			OnHostComplete.Broadcast(false);
 		}
 		return;
@@ -350,16 +417,109 @@ void UDinoSessionSubsystem::HandleDestroyComplete(FName SessionName, bool bWasSu
 		}
 		else
 		{
-			UE_LOG(LogDinoNet, Error, TEXT("Could not leave the previous session, so joining was abandoned."));
+			DinoScreenError(TEXT("Could not leave the previous session, so joining was abandoned."));
 			OnJoinComplete.Broadcast(false);
 		}
 		return;
 	}
 
-	UE_LOG(LogDinoNet, Log, TEXT("Left session %s (%s)."), *SessionName.ToString(),
-		bWasSuccessful ? TEXT("ok") : TEXT("failed"));
+	// Only on a real leave - the rehost and join paths returned above, and both want the code
+	// they are about to replace left alone until then.
+	CurrentJoinCode.Reset();
+
+	DinoScreenLog(FString::Printf(TEXT("Left session %s (%s)."), *SessionName.ToString(),
+		bWasSuccessful ? TEXT("ok") : TEXT("failed")));
 
 	OnLeaveComplete.Broadcast(bWasSuccessful);
+}
+
+// --- Join codes ------------------------------------------------------------------------------
+
+FString UDinoSessionSubsystem::GenerateJoinCode()
+{
+	const int32 AlphabetSize = FCString::Strlen(JoinCodeAlphabet);
+
+	FString Code;
+	Code.Reserve(JoinCodeLength);
+	for (int32 i = 0; i < JoinCodeLength; ++i)
+	{
+		Code.AppendChar(JoinCodeAlphabet[FMath::RandRange(0, AlphabetSize - 1)]);
+	}
+
+	return Code;
+}
+
+FString UDinoSessionSubsystem::NormaliseJoinCode(const FString& Raw)
+{
+	// Drop anything outside the alphabet rather than rejecting it. People type "abc def",
+	// "ABC-DEF", or paste it with a trailing space, and all three mean the same code.
+	FString Out;
+	Out.Reserve(Raw.Len());
+
+	for (const TCHAR Ch : Raw)
+	{
+		const TCHAR Upper = FChar::ToUpper(Ch);
+		if (FCString::Strchr(JoinCodeAlphabet, Upper) != nullptr)
+		{
+			Out.AppendChar(Upper);
+		}
+	}
+
+	return Out;
+}
+
+void UDinoSessionSubsystem::JoinByCode(const FString& JoinCode)
+{
+	const FString Code = NormaliseJoinCode(JoinCode);
+
+	if (Code.Len() != JoinCodeLength)
+	{
+		DinoScreenError(FString::Printf(TEXT("Join code must be %d characters. Got \"%s\"."), JoinCodeLength, *Code));
+		OnJoinComplete.Broadcast(false);
+		return;
+	}
+
+	DinoScreenLog(FString::Printf(TEXT("Looking for code %s..."), *Code));
+
+	PendingJoinCode = Code;
+	FindSessionByCode(Code);
+}
+
+void UDinoSessionSubsystem::FindSessionByCode(const FString& JoinCode)
+{
+	const IOnlineSessionPtr Sessions = GetSessions();
+	if (!Sessions.IsValid())
+	{
+		PendingJoinCode.Reset();
+		DinoScreenError(TEXT("No session interface available - is Steam running?"));
+		OnJoinComplete.Broadcast(false);
+		return;
+	}
+
+	Search = MakeShared<FOnlineSessionSearch>();
+	// A code matches one session, so a large result cap buys nothing. Keeping it small also
+	// keeps the failure honest: if the filter ever stops working, this returns junk rather
+	// than silently joining a stranger's lobby out of fifty.
+	Search->MaxSearchResults = 10;
+	Search->bIsLanQuery = IsLANMode();
+	Search->QuerySettings.Set(SEARCH_LOBBIES, true, EOnlineComparisonOp::Equals);
+	Search->QuerySettings.Set(SEARCH_DEDICATED_ONLY, false, EOnlineComparisonOp::Equals);
+
+	// The line that makes this a join code rather than a browse. Steam applies this filter
+	// lobby-side, so AppID 480's shared Spacewar traffic never reaches us at all.
+	Search->QuerySettings.Set(SETTING_DINOJOINCODE, JoinCode, EOnlineComparisonOp::Equals);
+
+	FindHandle = Sessions->AddOnFindSessionsCompleteDelegate_Handle(
+		FOnFindSessionsCompleteDelegate::CreateUObject(this, &UDinoSessionSubsystem::HandleFindComplete));
+
+	if (!Sessions->FindSessions(0, Search.ToSharedRef()))
+	{
+		Sessions->ClearOnFindSessionsCompleteDelegate_Handle(FindHandle);
+		Search.Reset();
+		PendingJoinCode.Reset();
+		DinoScreenError(TEXT("Session search was rejected."));
+		OnJoinComplete.Broadcast(false);
+	}
 }
 
 // --- Console scaffolding ---------------------------------------------------------------------
@@ -369,29 +529,16 @@ void UDinoSessionSubsystem::HandleDestroyComplete(FName SessionName, bool bWasSu
 
 void UDinoSessionSubsystem::ConsoleHost(const FString& MapName, int32 MaxPlayers)
 {
-	FString ResolvedMap = MapName;
-	if (ResolvedMap.IsEmpty())
-	{
-		const UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
-		ResolvedMap = World ? UWorld::RemovePIEPrefix(World->GetMapName()) : FString();
-	}
-
-	if (ResolvedMap.IsEmpty())
-	{
-		UE_LOG(LogDinoNet, Error, TEXT("DinoHost: could not work out which map to host."));
-		return;
-	}
-
 	const int32 Slots = MaxPlayers > 0 ? MaxPlayers : 4;
-	UE_LOG(LogDinoNet, Log, TEXT("DinoHost: %s, %d slots, %s."), *ResolvedMap, Slots,
-		IsLANMode() ? TEXT("LAN") : TEXT("online"));
+	DinoScreenLog(FString::Printf(TEXT("DinoHost: %d slots, %s."), Slots,
+		IsLANMode() ? TEXT("LAN") : TEXT("online")));
 
-	HostSession(ResolvedMap, Slots, false);
+	HostSession(MapName, Slots, false);
 }
 
 void UDinoSessionSubsystem::ConsoleFind()
 {
-	UE_LOG(LogDinoNet, Log, TEXT("DinoFind: searching (%s)..."), IsLANMode() ? TEXT("LAN") : TEXT("online"));
+	DinoScreenLog(FString::Printf(TEXT("DinoFind: searching (%s)..."), IsLANMode() ? TEXT("LAN") : TEXT("online")));
 	FindSessions(50);
 }
 
@@ -399,24 +546,24 @@ void UDinoSessionSubsystem::ConsoleJoin(int32 SessionIndex)
 {
 	if (!Search.IsValid())
 	{
-		UE_LOG(LogDinoNet, Error, TEXT("DinoJoin: no search results — run DinoFind first."));
+		DinoScreenError(TEXT("DinoJoin: no search results - run DinoFind first."));
 		return;
 	}
 
 	if (!Search->SearchResults.IsValidIndex(SessionIndex))
 	{
-		UE_LOG(LogDinoNet, Error, TEXT("DinoJoin: index %d out of range (%d result(s))."),
-			SessionIndex, Search->SearchResults.Num());
+		DinoScreenError(FString::Printf(TEXT("DinoJoin: index %d out of range (%d result(s))."),
+			SessionIndex, Search->SearchResults.Num()));
 		return;
 	}
 
-	UE_LOG(LogDinoNet, Log, TEXT("DinoJoin: joining index %d..."), SessionIndex);
+	DinoScreenLog(FString::Printf(TEXT("DinoJoin: joining index %d..."), SessionIndex));
 	JoinFoundSession(SessionIndex);
 }
 
 void UDinoSessionSubsystem::ConsoleLeave()
 {
-	UE_LOG(LogDinoNet, Log, TEXT("DinoLeave: requested."));
+	DinoScreenLog(TEXT("DinoLeave: requested."));
 	LeaveSession();
 }
 
@@ -425,15 +572,22 @@ void UDinoSessionSubsystem::ConsoleNetStatus()
 	const IOnlineSubsystem* Subsystem = IOnlineSubsystem::Get();
 	const UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
 
-	UE_LOG(LogDinoNet, Log, TEXT("--- Dino net status ---"));
-	UE_LOG(LogDinoNet, Log, TEXT("  backend     : %s"),
-		Subsystem ? *Subsystem->GetSubsystemName().ToString() : TEXT("<none>"));
-	UE_LOG(LogDinoNet, Log, TEXT("  LAN fallback: %s"), IsLANMode() ? TEXT("yes") : TEXT("no"));
-	UE_LOG(LogDinoNet, Log, TEXT("  in session  : %s"), IsInSession() ? TEXT("yes") : TEXT("no"));
+	// 60s: this is a whole block to read, and on a second machine there is no scrollback to
+	// recover it from once it fades.
+	const float StatusDuration = 60.0f;
+
+	DinoScreenLog(TEXT("--- Dino net status ---"), FColor::Cyan, StatusDuration);
+	// First line on purpose: when two players disagree about behaviour, the first thing worth
+	// ruling out is that they are on different builds.
+	DinoScreenLog(FString::Printf(TEXT("  build       : %s"), *UDinoBuildInfo::GetBuildVersion()), FColor::White, StatusDuration);
+	DinoScreenLog(FString::Printf(TEXT("  backend     : %s"),
+		Subsystem ? *Subsystem->GetSubsystemName().ToString() : TEXT("<none>")), FColor::White, StatusDuration);
+	DinoScreenLog(FString::Printf(TEXT("  LAN fallback: %s"), IsLANMode() ? TEXT("yes") : TEXT("no")), FColor::White, StatusDuration);
+	DinoScreenLog(FString::Printf(TEXT("  in session  : %s"), IsInSession() ? TEXT("yes") : TEXT("no")), FColor::White, StatusDuration);
 
 	if (!World)
 	{
-		UE_LOG(LogDinoNet, Log, TEXT("  world       : <none>"));
+		DinoScreenLog(TEXT("  world       : <none>"), FColor::White, StatusDuration);
 		return;
 	}
 
@@ -446,16 +600,18 @@ void UDinoSessionSubsystem::ConsoleNetStatus()
 	default: break;
 	}
 
-	UE_LOG(LogDinoNet, Log, TEXT("  net mode    : %s"), NetModeText);
-	UE_LOG(LogDinoNet, Log, TEXT("  map         : %s"), *UWorld::RemovePIEPrefix(World->GetMapName()));
+	DinoScreenLog(FString::Printf(TEXT("  net mode    : %s"), NetModeText), FColor::White, StatusDuration);
+	DinoScreenLog(FString::Printf(TEXT("  map         : %s"), *UWorld::RemovePIEPrefix(World->GetMapName())), FColor::White, StatusDuration);
 
 	if (const UNetDriver* Driver = World->GetNetDriver())
 	{
-		UE_LOG(LogDinoNet, Log, TEXT("  net driver  : %s"), *Driver->GetClass()->GetName());
-		UE_LOG(LogDinoNet, Log, TEXT("  connections : %d"), Driver->ClientConnections.Num());
+		// The line the whole command exists for: SteamSocketsNetDriver means traffic is going
+		// over Steam's relay, IpNetDriver means it silently fell back to raw IP.
+		DinoScreenLog(FString::Printf(TEXT("  net driver  : %s"), *Driver->GetClass()->GetName()), FColor::Yellow, StatusDuration);
+		DinoScreenLog(FString::Printf(TEXT("  connections : %d"), Driver->ClientConnections.Num()), FColor::White, StatusDuration);
 	}
 	else
 	{
-		UE_LOG(LogDinoNet, Log, TEXT("  net driver  : <none>"));
+		DinoScreenLog(TEXT("  net driver  : <none>"), FColor::Yellow, StatusDuration);
 	}
 }

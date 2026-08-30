@@ -14,6 +14,18 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Dino|Multiplayer")
 	void OnLocalPawnReady(APawn* NewPawn);
 
+	/**
+	 * Blueprint widget used for the host/join menu. Must derive from UDinoJoinMenu. Set this on
+	 * BP_FirstPersonPlayerController - left empty, the menu simply reports that it is unset
+	 * rather than silently doing nothing.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|UI")
+	TSubclassOf<class UDinoJoinMenu> JoinMenuClass;
+
+	/** Opens the menu, or closes it if already open. Bind this to a key in Blueprint. */
+	UFUNCTION(BlueprintCallable, Category = "Dino|UI")
+	void ToggleJoinMenu();
+
 	// --- Console scaffolding ---------------------------------------------------------------
 	// TODO(join-ui): delete this whole block, its implementations, and UDinoSessionSubsystem's
 	// Console* functions once a real join UI exists. Temporary until the join model is decided.
@@ -48,6 +60,18 @@ public:
 	UFUNCTION(Exec)
 	void DinoLeave();
 
+	/** Opens the host/join menu. Same thing ToggleJoinMenu does, reachable from the console. */
+	UFUNCTION(Exec)
+	void DinoMenu();
+
+	/** Prints the join code for the session this player is hosting. */
+	UFUNCTION(Exec)
+	void DinoCode();
+
+	/** Joins by code, e.g. "DinoJoinCode K7M2PQ". Case and separators are ignored. */
+	UFUNCTION(Exec)
+	void DinoJoinCode(const FString& JoinCode);
+
 	/** Prints backend, net mode, and — the point of it — which net driver actually got used. */
 	UFUNCTION(Exec)
 	void DinoNetStatus();
@@ -55,6 +79,10 @@ public:
 	/** Prints whether voice is enabled, who is registered as a talker, and the engine's own dump. */
 	UFUNCTION(Exec)
 	void DinoVoiceStatus();
+
+	/** Re-shows the build version on screen. Not scaffolding — playtesters need this. */
+	UFUNCTION(Exec)
+	void DinoBuildVersion();
 
 protected:
 	virtual void BeginPlay() override;
@@ -64,10 +92,24 @@ protected:
 private:
 	class UDinoSessionSubsystem* GetSessionSubsystem() const;
 
+	/** Created on first use and kept, so a reopened menu is not rebuilt from scratch. */
+	UPROPERTY(Transient)
+	TObjectPtr<class UDinoJoinMenu> JoinMenu;
+
 	/**
 	 * Starts transmitting for the local player. Open mic: the engine gates transmission on input
 	 * level (voice.SilenceDetectionThreshold), so there is no key to hold — this just opens the
 	 * channel once and leaves it open. Safe to call more than once.
 	 */
 	void EnableOpenMic();
+
+	/**
+	 * Puts the build version on screen and leaves it there, so a tester can read or
+	 * screenshot it at any point without being told how.
+	 *
+	 * Called from BeginPlay rather than once at startup because the engine clears on-screen
+	 * messages on level load — and hosting or joining both travel, which is exactly when
+	 * knowing the build matters most.
+	 */
+	void ShowBuildVersionOnScreen();
 };

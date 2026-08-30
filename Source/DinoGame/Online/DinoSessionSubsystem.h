@@ -64,6 +64,27 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Dino|Sessions")
 	bool IsLANMode() const;
 
+	// --- Join codes ------------------------------------------------------------------------
+	// A short code is the whole join model: the host reads it out, the joiner types it. It is
+	// published as a session setting and used as a search filter, so the joiner never sees a
+	// list and never has to recognise their own session among strangers' AppID 480 lobbies.
+
+	/** The code for the session this player is hosting. Empty when not hosting. */
+	UFUNCTION(BlueprintPure, Category = "Dino|Sessions")
+	FString GetCurrentJoinCode() const { return CurrentJoinCode; }
+
+	/**
+	 * Finds and joins the session advertising JoinCode. Case and separators are ignored, so
+	 * "abc-def" and "ABCDEF" both work — players retype these from memory or from voice.
+	 * Reports through OnJoinComplete like any other join.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Dino|Sessions")
+	void JoinByCode(const FString& JoinCode);
+
+	/** Uppercases and strips anything outside the code alphabet. Exposed for input validation. */
+	UFUNCTION(BlueprintPure, Category = "Dino|Sessions")
+	static FString NormaliseJoinCode(const FString& Raw);
+
 	UPROPERTY(BlueprintAssignable, Category = "Dino|Sessions")
 	FDinoSessionOpResult OnHostComplete;
 
@@ -123,6 +144,21 @@ private:
 		Rehost,
 		Join,
 	};
+
+	/** Six characters from an alphabet with no visually or audibly ambiguous symbols. */
+	static FString GenerateJoinCode();
+
+	/** Kicks off a search filtered to a single join code. */
+	void FindSessionByCode(const FString& JoinCode);
+
+	/** Code advertised by the session we are hosting. */
+	FString CurrentJoinCode;
+
+	/**
+	 * Set while a JoinByCode search is in flight. Non-empty means HandleFindComplete should
+	 * join the result itself rather than just reporting the list to the UI.
+	 */
+	FString PendingJoinCode;
 
 	/** Request held across the destroy-then-retry cycle used to clear a stale session. */
 	FString PendingMapName;

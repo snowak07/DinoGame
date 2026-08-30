@@ -58,6 +58,21 @@ if "%PUBLISH%"=="1" (
     )
 )
 
+REM Work out which tree this build comes from, and write it where DinoGame.Build.cs will
+REM compile it into the binary. Done before building, not before uploading, so a package
+REM made without publishing still knows what it is. A build with uncommitted changes is
+REM marked -dirty, because the SHA alone does not describe what is in it.
+REM
+REM Build/ is gitignored, so stamping never dirties the tree it is describing.
+set GITVER=unknown
+for /f "delims=" %%i in ('git -C "%PROJDIR%" rev-parse --short HEAD 2^>nul') do set GITVER=%%i
+git -C "%PROJDIR%" diff --quiet HEAD 2>nul
+if errorlevel 1 set GITVER=%GITVER%-dirty
+
+if not exist "%PROJDIR%\Build" mkdir "%PROJDIR%\Build"
+> "%PROJDIR%\Build\DinoBuildVersion.txt" echo %GITVER%
+echo Build version: %GITVER%
+
 echo.
 echo === [1/3] Editor target (needed for a correct cook) ===
 call "%UE%\Engine\Build\BatchFiles\Build.bat" DinoGameEditor Win64 Development -Project="%PROJ%" -WaitMutex
@@ -84,14 +99,8 @@ if "%PUBLISH%"=="0" (
     exit /b 0
 )
 
-REM Stamp the upload with the commit it came from, so a tester saying "build a3f91c2
-REM is broken" maps to an exact tree. A build made with uncommitted changes is marked
-REM -dirty, because that SHA does not describe what is actually in the package.
-set GITVER=unknown
-for /f "delims=" %%i in ('git -C "%PROJDIR%" rev-parse --short HEAD 2^>nul') do set GITVER=%%i
-git -C "%PROJDIR%" diff --quiet HEAD 2>nul
-if errorlevel 1 set GITVER=%GITVER%-dirty
-
+REM GITVER was computed before the build, so the version itch records is the same string
+REM compiled into the binary being uploaded.
 echo.
 echo === [3/3] Publishing to itch as %ITCH_TARGET%:%ITCH_CHANNEL% (version %GITVER%) ===
 butler push "%ARCHIVE%\Windows" %ITCH_TARGET%:%ITCH_CHANNEL% --userversion %GITVER%
