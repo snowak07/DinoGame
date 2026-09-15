@@ -11,6 +11,8 @@
 #include "Interfaces/VoiceInterface.h"
 #include "Online/DinoSessionSubsystem.h"
 #include "OnlineSubsystem.h"
+#include "AI/DinoAIControllerBase.h"
+#include "EngineUtils.h"
 #include "UI/DinoJoinMenu.h"
 
 void ADinoPlayerController::BeginPlay()
@@ -207,6 +209,148 @@ void ADinoPlayerController::DinoNetStatus()
 	if (UDinoSessionSubsystem* Subsystem = GetSessionSubsystem())
 	{
 		Subsystem->ConsoleNetStatus();
+	}
+}
+
+void ADinoPlayerController::DinoAIStatus()
+{
+	const float StatusDuration = 60.0f;
+
+	DinoScreenLog(TEXT("--- Dino AI status ---"), FColor::Cyan, StatusDuration);
+
+	// AI controllers are server-only, so on a client this list is legitimately empty
+	// rather than broken. Say so, otherwise it reads as "the AI vanished".
+	if (!HasAuthority())
+	{
+		DinoScreenLog(TEXT("  (client - AI runs on the host, so nothing is listed here)"),
+			FColor::Yellow, StatusDuration);
+		return;
+	}
+
+	int32 Count = 0;
+	for (TActorIterator<ADinoAIControllerBase> It(GetWorld()); It; ++It)
+	{
+		DinoScreenLog(FString::Printf(TEXT("  %s"), *It->DescribeState()), FColor::White, StatusDuration);
+		++Count;
+	}
+
+	if (Count == 0)
+	{
+		DinoScreenLog(TEXT("  no AI creatures in the level"), FColor::Yellow, StatusDuration);
+	}
+}
+
+void ADinoPlayerController::DinoAICheck()
+{
+	const float Duration = 90.0f;
+
+	DinoScreenLog(TEXT("--- Dino AI setup check ---"), FColor::Cyan, Duration);
+
+	if (!HasAuthority())
+	{
+		DinoScreenError(TEXT("Run this on the host - AI only exists there."));
+		return;
+	}
+
+	int32 Count = 0;
+	for (TActorIterator<ADinoAIControllerBase> It(GetWorld()); It; ++It)
+	{
+		TArray<FString> Lines;
+		It->RunSetupCheck(Lines);
+
+		for (const FString& Line : Lines)
+		{
+			const bool bFail = Line.StartsWith(TEXT("[FAIL]"));
+			DinoScreenLog(Line, bFail ? FColor::Red : FColor::White, Duration);
+		}
+		++Count;
+	}
+
+	if (Count == 0)
+	{
+		DinoScreenError(TEXT("No AI creatures found. Is BP_TRex in the level with Auto Possess AI set?"));
+	}
+}
+
+void ADinoPlayerController::DinoAIHistory()
+{
+	const float Duration = 120.0f;
+
+	DinoScreenLog(TEXT("--- Dino AI search history (newest first) ---"), FColor::Cyan, Duration);
+
+	if (!HasAuthority())
+	{
+		DinoScreenError(TEXT("Run this on the host - AI only exists there."));
+		return;
+	}
+
+	for (TActorIterator<ADinoAIControllerBase> It(GetWorld()); It; ++It)
+	{
+		TArray<FString> Lines;
+		It->DescribeSearchHistory(Lines);
+		for (const FString& Line : Lines)
+		{
+			DinoScreenLog(Line, FColor::White, Duration);
+		}
+	}
+}
+
+void ADinoPlayerController::DinoAIDebug()
+{
+	IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("DinoAI.DebugDraw"));
+	if (!CVar)
+	{
+		DinoScreenError(TEXT("DinoAI.DebugDraw not found."));
+		return;
+	}
+
+	const bool bEnable = CVar->GetInt() == 0;
+	CVar->Set(bEnable ? 1 : 0, ECVF_SetByConsole);
+
+	// Local to this machine: debug draw is per-viewport, so each player toggles their own.
+	DinoScreenLog(FString::Printf(TEXT("AI debug draw %s"), bEnable ? TEXT("ON") : TEXT("OFF")),
+		FColor::Cyan, 6.0f);
+}
+
+void ADinoPlayerController::DinoSetState(const FString& DesiredState)
+{
+	// Awareness lives on the server; a client forcing it locally would be overwritten by the
+	// next replication and look like the command silently failed.
+	if (!HasAuthority())
+	{
+		DinoScreenError(TEXT("DinoSetState only works on the host - AI runs there."));
+		return;
+	}
+
+	const bool bRelease = DesiredState.StartsWith(TEXT("auto"), ESearchCase::IgnoreCase)
+		|| DesiredState.StartsWith(TEXT("release"), ESearchCase::IgnoreCase);
+
+	EDinoAwareness Wanted = EDinoAwareness::Unaware;
+	if (!bRelease && !DinoAwarenessFromString(DesiredState, Wanted))
+	{
+		DinoScreenError(FString::Printf(
+			TEXT("Unknown state \"%s\". Try: Unaware, Suspicious, Alerted, Hunting, Searching, or auto."),
+			*DesiredState));
+		return;
+	}
+
+	int32 Count = 0;
+	for (TActorIterator<ADinoAIControllerBase> It(GetWorld()); It; ++It)
+	{
+		if (bRelease)
+		{
+			It->DebugReleaseAwareness();
+		}
+		else
+		{
+			It->DebugForceAwareness(Wanted);
+		}
+		++Count;
+	}
+
+	if (Count == 0)
+	{
+		DinoScreenError(TEXT("No AI creatures in the level."));
 	}
 }
 

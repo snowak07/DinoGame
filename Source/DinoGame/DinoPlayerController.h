@@ -80,6 +80,30 @@ public:
 	UFUNCTION(Exec)
 	void DinoVoiceStatus();
 
+	/** Lists every AI creature with its awareness, target, and last known location. */
+	UFUNCTION(Exec)
+	void DinoAIStatus();
+
+	/** Validates every piece a working creature needs, reporting each pass or fail. */
+	UFUNCTION(Exec)
+	void DinoAICheck();
+
+	/** Prints the last dozen search legs, so a fast-scrolling readout can be read after the fact. */
+	UFUNCTION(Exec)
+	void DinoAIHistory();
+
+	/** Toggles the state-coloured debug capsules over every creature. */
+	UFUNCTION(Exec)
+	void DinoAIDebug();
+
+	/**
+	 * Forces every creature into a state and locks it there, so one state can be tested
+	 * without perception overwriting it. Partial names work: "hunt", "search", "sus".
+	 * Pass "auto" or "release" to hand control back to perception.
+	 */
+	UFUNCTION(Exec)
+	void DinoSetState(const FString& DesiredState);
+
 	/** Re-shows the build version on screen. Not scaffolding — playtesters need this. */
 	UFUNCTION(Exec)
 	void DinoBuildVersion();

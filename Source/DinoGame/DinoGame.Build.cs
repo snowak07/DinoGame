@@ -24,7 +24,12 @@ public class DinoGame : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[] {
 			"OnlineSubsystem",
-			"OnlineSubsystemUtils"
+			"OnlineSubsystemUtils",
+			// NavigationSystem is separate from AIModule: perception comes from AIModule,
+			// but UNavigationInvokerComponent and the navmesh types live here.
+			"NavigationSystem",
+			// Native gameplay tags, used to drive StateTree transitions by event.
+			"GameplayTags"
 		});
 
 		PublicIncludePaths.AddRange(new string[] {
