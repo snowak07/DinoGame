@@ -3,9 +3,12 @@
 #include "CoreMinimal.h"
 #include "AIController.h"
 #include "AI/DinoAITypes.h"
+#include "DinoCombatTypes.h"
 #include "DinoAIControllerBase.generated.h"
 
+class ADinoCharacter;
 class UAIPerceptionComponent;
+class UDinoAttackComponent;
 class UAISenseConfig_Sight;
 class UAISenseConfig_Hearing;
 class UStateTreeAIComponent;
@@ -15,15 +18,25 @@ struct FEnvQueryResult;
 /**
  * Shared perception and target tracking for every creature.
  *
- * Holds no species behaviour — no patrol, no attack, no flee. It answers one question
- * and answers it the same way for every dinosaur: what do I currently know about, and
- * where do I think it is? Species behaviour consumes that from a StateTree.
+ * Holds no species behaviour — no patrol, no flee. It answers one question and answers it
+ * the same way for every dinosaur: what do I currently know about, and where do I think it
+ * is? Species behaviour consumes that from a StateTree.
+ *
+ * Attacks split the same way. This decides *when* - it owns awareness and targets - and the
+ * species' UDinoAttackComponent decides *how*. Only the component base class is visible from
+ * here, so a new attack style needs no changes in this class.
  *
  * AI controllers exist only on the server and never replicate, so nothing here is
  * visible to clients. Anything a client needs must go through the pawn — see
  * ADinoCreature::SetAwareness.
+ *
+ * Deliberately not Abstract, although it is only ever used through a per-species Blueprint.
+ * Editor class pickers hide abstract classes, and a StateTree's schema has to name this class
+ * as its AI Controller Class - naming a species' Blueprint instead means the tree refuses to
+ * start on every other species, including a duplicated controller Blueprint, which is a
+ * sibling rather than a child.
  */
-UCLASS(Abstract)
+UCLASS()
 class DINOGAME_API ADinoAIControllerBase : public AAIController
 {
 	GENERATED_BODY()
@@ -136,9 +149,62 @@ public:
 
 	bool IsAwarenessLocked() const { return bAwarenessLocked; }
 
+	// --- Combat ------------------------------------------------------------------------------
+
+	/** This creature's attack, or null for one that never attacks. */
+	UDinoAttackComponent* GetAttackComponent() const { return AttackComponent; }
+
+	/**
+	 * True while the attack component is doing anything - winding up, lunging, holding a
+	 * victim, recovering, or staggered.
+	 *
+	 * While engaged, perception keeps updating what the creature knows but may not change its
+	 * awareness. Otherwise losing sight mid-devour would drop it to Searching, the StateTree
+	 * would leave the Attacking state, and the "unstoppable" devour would be stopped by the
+	 * victim's own head blocking the sight trace.
+	 */
+	bool IsEngagedInAttack() const;
+
+	/** Called by the attack StateTree task while awareness is debug-locked. */
+	bool TryStartForcedAttack();
+
+	/** Called by the attack StateTree task when its state is left mid-attack. */
+	void CancelAttackFromStateTree();
+
+	/** Called by the creature when it dies. Stops every decision this controller makes. */
+	void HandleCreatureDied();
+
+	// --- Chasing -------------------------------------------------------------------------------
+
+	/**
+	 * Keeps a move toward Request's goal actor going. Called every tick by the Hunting task.
+	 *
+	 * Issues a new move only when needed: the last one ended (reached the target, got blocked,
+	 * lost its path), the goal actor changed, or bForceNewMove. Throttled so a target that
+	 * cannot be reached costs one pathfinding query every quarter second rather than one per
+	 * frame.
+	 */
+	void MaintainChase(const FAIMoveRequest& Request, bool bForceNewMove);
+
+	/** Ends the chase and stops the current move. Called when the Hunting state is left. */
+	void StopChase();
+
+	/**
+	 * Readout for debug draw and DinoAIStatus: moves issued, how many were restarts after a move
+	 * ended, how the last move ended, and whether the current path is partial.
+	 *
+	 * The restart count is the evidence that the chase is recovering from moves that end on
+	 * their own. Before the chase existed, each of those was a silent stall.
+	 */
+	FString DescribeChase() const;
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void OnPossess(APawn* InPawn) override;
+	virtual void OnUnPossess() override;
+
+	/** Records how every move ended, for DescribeChase. */
+	virtual void OnMoveCompleted(FAIRequestID RequestID, const FPathFollowingResult& Result) override;
 
 	/** Sight cone. Beyond LoseSightRadius a live contact becomes a memory. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|AI|Perception", meta = (ClampMin = "0.0"))
@@ -331,6 +397,59 @@ private:
 	UFUNCTION()
 	void HandlePerceptionUpdated(AActor* Actor, FAIStimulus Stimulus);
 
+	/**
+	 * Takes Actor as the current target. The success half of HandlePerceptionUpdated, split
+	 * out so the post-kill re-scan acquires a new target through exactly the same path.
+	 */
+	void AcquireTarget(AActor* Actor, const FVector& SensedLocation, bool bBySight);
+
+	// --- Combat ------------------------------------------------------------------------------
+
+	/**
+	 * Every 0.1s, server only: drops targets that stopped being valid, and asks the attack
+	 * component whether it can attack. A timer rather than Tick because a tenth of a second is
+	 * well inside human reaction time, and this is cheap to skip on idle creatures.
+	 */
+	void TickCombat();
+
+	/** Adopts the attack's victim as the target and switches awareness to Attacking. */
+	void HandleAttackBegan(ADinoCharacter* Victim);
+
+	/** Chooses what comes after an attack: hunt on, search, re-target, or go idle. */
+	void HandleAttackFinished(EDinoAttackOutcome Outcome);
+
+	/**
+	 * Forgets the current target immediately and looks for another visible one.
+	 *
+	 * Not ForgetTarget, which bails while there is live contact - and a corpse is still "seen".
+	 * Perception tracks stimulus sources, so a dead player keeps being perceived; it is only
+	 * IsValidTarget that says to stop caring about it.
+	 */
+	void DropCurrentTarget(const TCHAR* Reason);
+
+	/** Adopts the nearest valid player currently in sight, if any. */
+	bool TryAcquireVisibleTarget();
+
+	bool IsCreatureDead() const;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UDinoAttackComponent> AttackComponent;
+
+	FDelegateHandle AttackBeganHandle;
+	FDelegateHandle AttackFinishedHandle;
+	FTimerHandle CombatTimer;
+
+	// --- Chase state and diagnostics ----------------------------------------------------------
+
+	bool bChasing = false;
+	TWeakObjectPtr<AActor> ChaseGoal;
+	double LastChaseMoveTime = -1.0;
+	int32 ChaseMovesIssued = 0;
+	int32 ChaseRestarts = 0;
+	bool bChasePathPartial = false;
+	FString LastChaseRequest = TEXT("none");
+	FString LastMoveEnd = TEXT("none");
+
 	/** Fires once MemoryDuration elapses without regaining contact. */
 	void ForgetTarget();
 
@@ -399,7 +518,12 @@ private:
 	double LastLegStartTime = 0.0;
 	FString LastQueryOutcome = TEXT("none yet");
 
-	/** Only players are worth hunting; creatures sensing each other comes later. */
+	/**
+	 * Living players only, and not ones another creature is already holding.
+	 *
+	 * The held-by-another rule is what makes a pack spread out: a second raptor goes for the
+	 * players trying to rescue its packmate's victim instead of stacking on the same one.
+	 */
 	bool IsValidTarget(const AActor* Actor) const;
 
 	UPROPERTY(Transient)

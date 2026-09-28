@@ -1,6 +1,7 @@
 ﻿#include "AI/DinoCreature.h"
 
 #include "AI/DinoAIControllerBase.h"
+#include "AI/DinoAttackComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "DinoGame.h"
@@ -65,6 +66,13 @@ void ADinoCreature::BeginPlay()
 		Movement->RotationRate = FRotator(0.0f, TurnRateDegreesPerSecond, 0.0f);
 	}
 
+	AttackComponent = FindComponentByClass<UDinoAttackComponent>();
+
+	if (HasAuthority())
+	{
+		CurrentHealth = MaxHealth;
+	}
+
 	// Runs on every machine, not just the server: Awareness is replicated, so clients can
 	// draw the same colours without any AI existing on them. Cheap while the CVar is off -
 	// one comparison every 100ms, and no per-frame tick on the actor.
@@ -106,6 +114,7 @@ void ADinoCreature::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLif
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
 	DOREPLIFETIME(ADinoCreature, Awareness);
+	DOREPLIFETIME(ADinoCreature, CurrentHealth);
 }
 
 void ADinoCreature::SetAwareness(EDinoAwareness NewAwareness)
@@ -127,6 +136,129 @@ void ADinoCreature::SetAwareness(EDinoAwareness NewAwareness)
 void ADinoCreature::OnRep_Awareness(EDinoAwareness OldAwareness)
 {
 	BroadcastAwarenessChange(OldAwareness);
+}
+
+UDinoAttackComponent* ADinoCreature::GetAttackComponent() const
+{
+	// Falls back to a search for callers that run before BeginPlay has cached it.
+	return AttackComponent ? AttackComponent.Get() : FindComponentByClass<UDinoAttackComponent>();
+}
+
+float ADinoCreature::TakeDamage(float Damage, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	const float ActualDamage = Super::TakeDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
+	if (!HasAuthority() || ActualDamage <= 0.0f || IsDead())
+	{
+		return 0.0f;
+	}
+
+	OnCreatureDamaged.Broadcast(ActualDamage, DamageCauser);
+
+	// Health first, so a killing blow does not also start a stagger on a corpse.
+	if (bCanBeKilled)
+	{
+		const float OldHealth = CurrentHealth;
+		CurrentHealth = FMath::Max(0.0f, CurrentHealth - ActualDamage);
+		ApplyHealthChange(OldHealth);
+	}
+
+	FString Reaction = TEXT("no effect");
+	if (IsDead())
+	{
+		Reaction = TEXT("killed");
+	}
+	else if (bCanBeStaggered && ActualDamage >= StaggerDamageThreshold)
+	{
+		// A staggerable creature with no attack component has nothing to be knocked off, so the
+		// stagger has nowhere to live. Logged rather than silent: it is a setup mistake.
+		UDinoAttackComponent* Attack = GetAttackComponent();
+		if (!Attack)
+		{
+			Reaction = TEXT("stagger skipped - no attack component");
+		}
+		else
+		{
+			Reaction = Attack->BeginStagger(StaggerDuration) ? TEXT("staggered") : TEXT("stagger refused");
+		}
+	}
+	else if (bCanBeStaggered)
+	{
+		Reaction = FString::Printf(TEXT("below stagger threshold %.0f"), StaggerDamageThreshold);
+	}
+
+	UE_LOG(LogDinoGame, Log, TEXT("%s took %.0f from %s: %s."), *GetName(), ActualDamage,
+		*GetNameSafe(DamageCauser), *Reaction);
+
+	return bCanBeKilled ? ActualDamage : 0.0f;
+}
+
+FString ADinoCreature::DescribeVulnerability() const
+{
+	if (!bCanBeStaggered && !bCanBeKilled)
+	{
+		return TEXT("invulnerable, cannot be staggered");
+	}
+
+	const FString Stagger = bCanBeStaggered
+		? FString::Printf(TEXT("stagger >= %.0f for %.1fs"), StaggerDamageThreshold, StaggerDuration)
+		: FString(TEXT("no stagger"));
+
+	const FString Health = bCanBeKilled
+		? FString::Printf(TEXT("killable %.0f/%.0f"), CurrentHealth, MaxHealth)
+		: FString(TEXT("unkillable"));
+
+	return Stagger + TEXT(", ") + Health;
+}
+
+void ADinoCreature::OnRep_CurrentHealth(float OldHealth)
+{
+	ApplyHealthChange(OldHealth);
+}
+
+void ADinoCreature::ApplyHealthChange(float OldHealth)
+{
+	if (bCanBeKilled && CurrentHealth <= 0.0f && OldHealth > 0.0f)
+	{
+		HandleDeath();
+	}
+}
+
+void ADinoCreature::HandleDeath()
+{
+	UE_LOG(LogDinoGame, Log, TEXT("%s died."), *GetName());
+
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
+		Movement->StopMovementImmediately();
+		Movement->DisableMovement();
+	}
+
+	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+	{
+		Capsule->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+	}
+
+	if (HasAuthority())
+	{
+		// Cancel before stopping the brain, so a pinned victim is released by the attack's own
+		// cleanup rather than left held by a corpse.
+		if (UDinoAttackComponent* Attack = GetAttackComponent())
+		{
+			Attack->CancelAttack();
+		}
+
+		if (ADinoAIControllerBase* AI = Cast<ADinoAIControllerBase>(GetController()))
+		{
+			AI->HandleCreatureDied();
+		}
+
+		if (NavigationInvoker)
+		{
+			NavigationInvoker->Deactivate();
+		}
+	}
+
+	OnCreatureDied.Broadcast();
 }
 
 void ADinoCreature::BroadcastAwarenessChange(EDinoAwareness OldAwareness)
@@ -181,16 +313,34 @@ void ADinoCreature::DrawStateDebug()
 	DrawDebugLine(World, EyeLocation, EyeLocation + GetViewRotation().Vector() * 400.0f,
 		FColor::Cyan, false, DebugDrawLifetime, 0, 1.5f);
 
-	FString Label = FString::Printf(TEXT("%s : %s"),
+	FString Label = FString::Printf(TEXT("%s : %s%s"),
 		SpeciesName.IsNone() ? *GetName() : *SpeciesName.ToString(),
-		*DinoAwarenessName(Awareness));
+		IsDead() ? TEXT("DEAD") : *DinoAwarenessName(Awareness),
+		bCanBeKilled && !IsDead() ? *FString::Printf(TEXT("  (%.0f hp)"), CurrentHealth) : TEXT(""));
 
-	// Only while searching, and only on the host where the controller exists.
-	if (Awareness == EDinoAwareness::Searching)
+	// Attack shapes and phase live in the component, which knows its own style. Phase and held
+	// victim replicate, so this draws the same on clients as on the host.
+	if (const UDinoAttackComponent* Attack = GetAttackComponent())
 	{
-		if (const ADinoAIControllerBase* Diag = Cast<ADinoAIControllerBase>(GetController()))
+		Attack->DrawDebug(World, DebugDrawLifetime);
+
+		const FString AttackText = Attack->DescribeAttack();
+		if (!AttackText.IsEmpty())
+		{
+			Label += TEXT("\n") + AttackText;
+		}
+	}
+
+	// Only on the host, where the controller exists.
+	if (const ADinoAIControllerBase* Diag = Cast<ADinoAIControllerBase>(GetController()))
+	{
+		if (Awareness == EDinoAwareness::Searching)
 		{
 			Label += TEXT("\n") + Diag->DescribeSearchDiagnostics();
+		}
+		else if (Awareness == EDinoAwareness::Hunting)
+		{
+			Label += TEXT("\n") + Diag->DescribeChase();
 		}
 	}
 

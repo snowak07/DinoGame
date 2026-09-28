@@ -1,4 +1,4 @@
-#include "DinoPlayerController.h"
+﻿#include "DinoPlayerController.h"
 
 #include "DinoBuildInfo.h"
 #include "DinoCharacter.h"
@@ -12,7 +12,11 @@
 #include "Online/DinoSessionSubsystem.h"
 #include "OnlineSubsystem.h"
 #include "AI/DinoAIControllerBase.h"
+#include "AI/DinoAttackComponent.h"
+#include "AI/DinoCreature.h"
 #include "EngineUtils.h"
+#include "GameFramework/DamageType.h"
+#include "Kismet/GameplayStatics.h"
 #include "UI/DinoJoinMenu.h"
 
 void ADinoPlayerController::BeginPlay()
@@ -329,7 +333,7 @@ void ADinoPlayerController::DinoSetState(const FString& DesiredState)
 	if (!bRelease && !DinoAwarenessFromString(DesiredState, Wanted))
 	{
 		DinoScreenError(FString::Printf(
-			TEXT("Unknown state \"%s\". Try: Unaware, Suspicious, Alerted, Hunting, Searching, or auto."),
+			TEXT("Unknown state \"%s\". Try: Unaware, Suspicious, Alerted, Hunting, Searching, att(acking), or auto."),
 			*DesiredState));
 		return;
 	}
@@ -352,6 +356,60 @@ void ADinoPlayerController::DinoSetState(const FString& DesiredState)
 	{
 		DinoScreenError(TEXT("No AI creatures in the level."));
 	}
+}
+
+void ADinoPlayerController::DinoHitDino(float Damage)
+{
+	// Creature damage is decided where the AI runs. A client applying it locally would change
+	// nothing the server knows about, and look like the command silently failed.
+	if (!HasAuthority())
+	{
+		DinoScreenError(TEXT("DinoHitDino only works on the host - creature damage is decided there."));
+		return;
+	}
+
+	const APawn* Me = GetPawn();
+	if (!Me)
+	{
+		DinoScreenError(TEXT("DinoHitDino needs a possessed pawn to measure from."));
+		return;
+	}
+
+	ADinoCreature* Nearest = nullptr;
+	float NearestDistance = TNumericLimits<float>::Max();
+	for (TActorIterator<ADinoCreature> It(GetWorld()); It; ++It)
+	{
+		if (It->IsDead())
+		{
+			continue;
+		}
+
+		const float Distance = FVector::Dist(Me->GetActorLocation(), It->GetActorLocation());
+		if (Distance < NearestDistance)
+		{
+			NearestDistance = Distance;
+			Nearest = *It;
+		}
+	}
+
+	if (!Nearest)
+	{
+		DinoScreenError(TEXT("No living creatures in the level."));
+		return;
+	}
+
+	UGameplayStatics::ApplyDamage(Nearest, Damage, this, GetPawn(), UDamageType::StaticClass());
+
+	// Reported after the hit, so the line shows what the hit actually did - staggered, refused,
+	// or nothing - rather than what the settings say it should do.
+	const UDinoAttackComponent* Attack = Nearest->GetAttackComponent();
+	const FString Phase = Attack ? UEnum::GetDisplayValueAsText(Attack->GetPhase()).ToString() : FString(TEXT("no attack"));
+
+	DinoScreenLog(FString::Printf(TEXT("Hit %s for %.0f at %.0f uu -> phase %s%s | %s"),
+		*Nearest->GetName(), Damage, NearestDistance, *Phase,
+		Nearest->IsDead() ? TEXT(", DEAD") : TEXT(""),
+		*Nearest->DescribeVulnerability()),
+		FColor(240, 150, 40), 8.0f);
 }
 
 void ADinoPlayerController::DinoVoiceStatus()

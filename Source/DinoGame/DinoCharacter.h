@@ -1,10 +1,12 @@
-#pragma once
+﻿#pragma once
 
 #include "CoreMinimal.h"
+#include "DinoCombatTypes.h"
 #include "Engine/Attenuation.h"
 #include "GameFramework/Character.h"
 #include "DinoCharacter.generated.h"
 
+class ADinoCreature;
 class USoundAttenuation;
 class UVOIPTalker;
 
@@ -53,7 +55,56 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Dino|Voice")
 	float GetVoiceLevel() const;
 
+	// --- Restraint ------------------------------------------------------------------------
+	// A player held by a creature: pinned under a raptor, or in a T-Rex's jaws. The creature's
+	// attack component decides when; this side owns what it does to the player.
+
+	/**
+	 * Server only. Stops the player moving and hands the camera hook its cue.
+	 *
+	 * Ignored for a dead player - a corpse cannot be grabbed - and for Kind None, which is
+	 * what EndRestraint is for.
+	 */
+	void BeginRestraint(ADinoCreature* Captor, EDinoRestraint Kind);
+
+	/** Server only. Safe to call when not restrained. */
+	void EndRestraint();
+
+	UFUNCTION(BlueprintPure, Category = "Dino|Restraint")
+	bool IsRestrained() const { return Restraint.Kind != EDinoRestraint::None; }
+
+	UFUNCTION(BlueprintPure, Category = "Dino|Restraint")
+	EDinoRestraint GetRestraintKind() const { return Restraint.Kind; }
+
+	/** The creature holding this player, or null. What a future jaw camera would attach to. */
+	UFUNCTION(BlueprintPure, Category = "Dino|Restraint")
+	ADinoCreature* GetRestrainingCreature() const { return Restraint.Captor; }
+
 protected:
+	/**
+	 * Fires on every machine when this player is grabbed or pinned.
+	 *
+	 * The camera hook. TODO(devour-camera): override this in BP_FirstPersonCharacter to move the
+	 * view into the captor's jaws - the captor's attack component names the socket, via
+	 * UDinoAttackComponent::GetGrabSocketName. Check IsLocallyControlled() before touching the
+	 * camera: this runs on every machine, and only the victim's own view should change.
+	 *
+	 * Movement and input are already locked by the time this runs, so an override only needs to
+	 * handle presentation. The C++ default does nothing beyond logging.
+	 */
+	UFUNCTION(BlueprintNativeEvent, Category = "Dino|Restraint")
+	void OnRestraintBegan(ADinoCreature* Captor, EDinoRestraint Kind);
+
+	/** Fires on every machine when the hold ends - freed, or dead. Undo the camera here. */
+	UFUNCTION(BlueprintNativeEvent, Category = "Dino|Restraint")
+	void OnRestraintEnded();
+
+	UPROPERTY(ReplicatedUsing = OnRep_Restraint, BlueprintReadOnly, Category = "Dino|Restraint")
+	FDinoRestraintState Restraint;
+
+	UFUNCTION()
+	void OnRep_Restraint(const FDinoRestraintState& OldRestraint);
+
 	virtual void BeginPlay() override;
 	virtual void PossessedBy(AController* NewController) override;
 	virtual void OnRep_PlayerState() override;
@@ -110,6 +161,26 @@ protected:
 
 private:
 	void ApplyHealthChange(float OldHealth);
+
+	/**
+	 * Everything that has to happen when health reaches zero. Runs on every machine, from the
+	 * same place the OnDied broadcast does, so the victim's own client stops predicting
+	 * movement at the same moment the server stops accepting it.
+	 */
+	void HandleDeath();
+
+	/** Applies or undoes restraint effects. Runs on every machine, like ApplyHealthChange. */
+	void ApplyRestraintChange(const FDinoRestraintState& OldRestraint);
+
+	/**
+	 * The controller whose move input this restraint switched off, so the release switches the
+	 * same one back on.
+	 *
+	 * SetIgnoreMoveInput is a counter, not a flag - every true needs exactly one false. Holding
+	 * the controller rather than re-reading GetController() at release keeps that pairing intact
+	 * even if possession changed in between; an unpaired true locks movement for good.
+	 */
+	TWeakObjectPtr<AController> RestraintInputController;
 
 	/**
 	 * Binds VoipTalker to this pawn's PlayerState. Called from both PossessedBy and

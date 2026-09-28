@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "CoreMinimal.h"
 #include "Tasks/StateTreeMoveToTask.h"
@@ -14,12 +14,37 @@
  *
  * Everything else about Move To is inherited unchanged, including Track Moving Goal.
  */
+
+/**
+ * Chases the controller's current target, for as long as the state lasts. The Hunting behaviour.
+ *
+ * Deliberately NOT a single move, unlike the stock Move To it derives from. A move ends - it
+ * reaches the target without being in position to attack, is blocked by geometry, or loses
+ * its path when the target steps somewhere unreachable - and a stock Move To then completes
+ * its state. Nothing in a tree driven by awareness events handles that completion, so
+ * StateTree falls back to Root, which selects its first child: the creature goes idle while
+ * its awareness still says Hunting, and stays that way until the player breaks line of sight.
+ * A stall with no error, reading in game as "it just stopped".
+ *
+ * So this never completes. Whenever a move ends it issues another, and it follows the
+ * controller if the target changes mid-hunt. The state is left only on an awareness event,
+ * like every other state.
+ *
+ * Uses the Move To settings on the node - Acceptable Radius, partial paths, reach tests - but
+ * always tracks the target as it moves: Track Moving Goal is ignored, since chasing a moving
+ * target is the entire point.
+ */
 USTRUCT(meta = (DisplayName = "Dino Move To Current Target", Category = "Dino|AI"))
 struct DINOGAME_API FDinoMoveToTargetTask : public FStateTreeMoveToTask
 {
 	GENERATED_BODY()
 
 	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
+	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const override;
+	virtual void ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
+
+	/** Forces ticking on - see FDinoMoveToLastKnownTask::Link. Tick is where a finished move is restarted. */
+	virtual bool Link(FStateTreeLinker& Linker) override;
 };
 
 /** Move To, aimed at where the target was last perceived. The Searching behaviour. */

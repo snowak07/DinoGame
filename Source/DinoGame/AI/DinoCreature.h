@@ -5,9 +5,12 @@
 #include "GameFramework/Character.h"
 #include "DinoCreature.generated.h"
 
+class UDinoAttackComponent;
 class UNavigationInvokerComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FDinoAwarenessChanged, EDinoAwareness, NewAwareness, EDinoAwareness, OldAwareness);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FDinoCreatureDamaged, float, Damage, AActor*, DamageCauser);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FDinoCreatureDied);
 
 /**
  * Base pawn for every AI creature, from the T-Rex down to ambient birds.
@@ -18,8 +21,11 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FDinoAwarenessChanged, EDinoAwarene
  *
  * Species differences are meant to be data and components on a Blueprint child, not
  * subclasses of this. See the "general skills a dinosaur can give" design note.
+ *
+ * Not Abstract, for the same reason as ADinoAIControllerBase: a shared StateTree's schema
+ * names this as its Context Actor Class, and editor class pickers hide abstract classes.
  */
-UCLASS(Abstract)
+UCLASS()
 class DINOGAME_API ADinoCreature : public ACharacter
 {
 	GENERATED_BODY()
@@ -98,6 +104,71 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Dino|AI")
 	float GetEyeHeightAboveFeet() const;
 
+	// --- Combat -------------------------------------------------------------------------------
+
+	/** This species' attack, or null for a creature that never attacks. */
+	UFUNCTION(BlueprintPure, Category = "Dino|Attack")
+	UDinoAttackComponent* GetAttackComponent() const;
+
+	/**
+	 * Decides what a hit does to this species: stagger, lose health, both, or nothing.
+	 *
+	 * The single entry point for hurting a creature. A future player weapon calls
+	 * ApplyDamage and lands here exactly as DinoHitDino does today.
+	 */
+	virtual float TakeDamage(float Damage, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
+
+	/** Always false for a creature that cannot be killed. */
+	UFUNCTION(BlueprintPure, Category = "Dino|Vulnerability")
+	bool IsDead() const { return bCanBeKilled && CurrentHealth <= 0.0f; }
+
+	UFUNCTION(BlueprintPure, Category = "Dino|Vulnerability")
+	float GetCurrentHealth() const { return CurrentHealth; }
+
+	/** One line for DinoAICheck and DinoHitDino, e.g. "stagger >= 10 for 1.2s, killable 90/150". */
+	FString DescribeVulnerability() const;
+
+	/**
+	 * Server only, every hit including ones this species ignores - so a T-Rex can still roar
+	 * when shot, without the hit doing anything.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "Dino|Vulnerability")
+	FDinoCreatureDamaged OnCreatureDamaged;
+
+	/** Every machine. The Blueprint hook for a ragdoll or death animation. */
+	UPROPERTY(BlueprintAssignable, Category = "Dino|Vulnerability")
+	FDinoCreatureDied OnCreatureDied;
+
+	/**
+	 * Whether a hard enough hit knocks this creature off its attack.
+	 *
+	 * The rescue mechanic: staggering a raptor releases the player it has pinned. Off by default,
+	 * and off on the T-Rex - an unconfigured creature should be invulnerable rather than
+	 * accidentally interruptible.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Vulnerability")
+	bool bCanBeStaggered = false;
+
+	/** Smallest single hit that staggers. Chip damage below this is ignored for stagger. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Vulnerability", meta = (ClampMin = "0.0", EditCondition = "bCanBeStaggered"))
+	float StaggerDamageThreshold = 10.0f;
+
+	/** Seconds a stagger holds the creature still before it can act again. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Vulnerability", meta = (ClampMin = "0.1", EditCondition = "bCanBeStaggered"))
+	float StaggerDuration = 1.2f;
+
+	/**
+	 * Whether this species can die at all.
+	 *
+	 * Off by default. Left as an option so some species can be killable without the rest of
+	 * the code assuming either way: the T-Rex never, raptors to be decided.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Vulnerability")
+	bool bCanBeKilled = false;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Vulnerability", meta = (ClampMin = "1.0", EditCondition = "bCanBeKilled"))
+	float MaxHealth = 150.0f;
+
 protected:
 	virtual void BeginPlay() override;
 
@@ -117,8 +188,25 @@ protected:
 	UFUNCTION()
 	void OnRep_Awareness(EDinoAwareness OldAwareness);
 
+	/** Replicated so clients agree on whether the creature is dead. Unused unless killable. */
+	UPROPERTY(ReplicatedUsing = OnRep_CurrentHealth, BlueprintReadOnly, Category = "Dino|Vulnerability")
+	float CurrentHealth = 150.0f;
+
+	UFUNCTION()
+	void OnRep_CurrentHealth(float OldHealth);
+
 private:
 	void BroadcastAwarenessChange(EDinoAwareness OldAwareness);
+
+	/** Runs on every machine, from both the server's write and the RepNotify. */
+	void ApplyHealthChange(float OldHealth);
+
+	/** Mirrors ADinoCharacter::HandleDeath: stop, stop blocking, and hand over to the Blueprint. */
+	void HandleDeath();
+
+	/** Cached at BeginPlay, when Blueprint-added components exist. */
+	UPROPERTY(Transient)
+	TObjectPtr<UDinoAttackComponent> AttackComponent;
 
 	/**
 	 * Draws a capsule and label in the current state's colour.

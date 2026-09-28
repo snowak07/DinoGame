@@ -1,4 +1,4 @@
-#include "AI/DinoAITypes.h"
+﻿#include "AI/DinoAITypes.h"
 
 namespace DinoAwarenessTags
 {
@@ -7,6 +7,7 @@ namespace DinoAwarenessTags
 	UE_DEFINE_GAMEPLAY_TAG(Alerted,    "Dino.Awareness.Alerted");
 	UE_DEFINE_GAMEPLAY_TAG(Hunting,    "Dino.Awareness.Hunting");
 	UE_DEFINE_GAMEPLAY_TAG(Searching,  "Dino.Awareness.Searching");
+	UE_DEFINE_GAMEPLAY_TAG(Attacking,  "Dino.Awareness.Attacking");
 
 	FGameplayTag FromAwareness(EDinoAwareness Awareness)
 	{
@@ -17,6 +18,9 @@ namespace DinoAwarenessTags
 		case EDinoAwareness::Alerted:    return Alerted.GetTag();
 		case EDinoAwareness::Hunting:    return Hunting.GetTag();
 		case EDinoAwareness::Searching:  return Searching.GetTag();
+		// Without this case ApplyAwareness sends no event at all - it skips invalid tags - and
+		// the StateTree never leaves Hunting, so the creature path-follows through its own attack.
+		case EDinoAwareness::Attacking:  return Attacking.GetTag();
 		default:                         return FGameplayTag();
 		}
 	}
@@ -33,6 +37,9 @@ FColor DinoAwarenessColor(EDinoAwareness Awareness)
 	case EDinoAwareness::Alerted:    return FColor(240, 150, 40);  // orange, knows
 	case EDinoAwareness::Hunting:    return FColor(220, 50, 50);   // red, coming for you
 	case EDinoAwareness::Searching:  return FColor(80, 150, 235);  // blue, looking
+	// White rather than a deeper red: red already means Hunting, and magenta is reserved below
+	// for "unmapped". The one colour that means "something is happening right now".
+	case EDinoAwareness::Attacking:  return FColor(245, 245, 245); // white, it has you
 	default:                         return FColor::Magenta;       // unmapped, obviously wrong
 	}
 }

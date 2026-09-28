@@ -114,23 +114,19 @@ repackage, not a restart. `VoiPSampleRate` defaults to 16 kHz and sounds like a 
 
 ## Console commands
 
-Development builds only — the console is compiled out of Shipping. Press `~` **twice** for the
-full console.
+**The full list, and how to open the console, is `docs/CONSOLE.md`.** It is the only list —
+not repeated here, so there is one copy to keep right.
 
-| Command | |
-|---|---|
-| `DinoHost` / `DinoHostMap <map> <slots>` | Host; prints the join code |
-| `DinoCode` | Show your join code |
-| `DinoJoinCode <code>` | Join by code |
-| `DinoFind` / `DinoJoin <index>` | Browse and join by index |
-| `DinoLeave` | Leave the session |
-| `DinoNetStatus` | Build, backend, net mode, **net driver**, connections |
-| `DinoVoiceStatus` | Voice config and per-talker state |
-| `DinoBuildVersion` | Re-show the build version |
-| `DinoMenu` | Open the host/join menu |
+**Update `docs/CONSOLE.md` in the same change as the code** whenever a `UFUNCTION(Exec)` on
+`ADinoPlayerController` is added, removed, or renamed; its arguments or defaults change; it
+becomes host-only or stops being; or a `TAutoConsoleVariable` is added or removed. A reference
+that is wrong is worse than none — it is what gets trusted mid-playtest.
 
-`net driver : SteamSocketsNetDriver` means traffic is on Steam's relay. `IpNetDriver` means it
-silently fell back to raw IP.
+Check nothing is missing — silent when complete, names any command the file lacks:
+
+```
+for c in $(grep -A1 "UFUNCTION(Exec)" Source/DinoGame/DinoPlayerController.h | grep -o "Dino[A-Za-z]*(" | tr -d '('); do grep -q "\`$c" docs/CONSOLE.md || echo "missing: $c"; done
+```
 
 ### Two exec gotchas
 
@@ -163,6 +159,7 @@ silently fell back to raw IP.
 |---|---|
 | `CLAUDE.md` | How to work in this codebase (this file) |
 | `docs/PIPELINE.md` | Team process: version control, art, builds, playtests |
+| `docs/CONSOLE.md` | Every console command and how to open the console. Kept in step with the code |
 | Notion, "Dino Game" | Live tasks and bugs. **"Dino Game (BACKUP)" is a duplicate — never write to it** |
 | `Builds/Windows/DinoGame/Saved/Logs/DinoGame.log` | What a packaged run actually did |
 

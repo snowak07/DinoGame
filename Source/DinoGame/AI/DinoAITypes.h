@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "CoreMinimal.h"
 #include "GameplayTagContainer.h"
@@ -13,8 +13,13 @@
  * music, roars, animation — without re-running any AI logic, which would diverge.
  *
  * Kept deliberately small. Species-specific nuance belongs in that species' StateTree,
- * not in more enum values; every creature has to map onto these five for shared systems
- * (audio, UI, analytics) to mean anything.
+ * not in more enum values; every creature has to map onto these for shared systems
+ * (audio, UI, analytics) to mean anything. Attacking was added as the sixth because
+ * "busy in melee" is shared by every predator and clients need it for cosmetics - how a
+ * species attacks is expressed by its attack component, not by more values here.
+ *
+ * New values go at the END. Awareness replicates as a uint8, so inserting one mid-enum
+ * shifts the wire value of everything after it.
  */
 UENUM(BlueprintType)
 enum class EDinoAwareness : uint8
@@ -38,7 +43,18 @@ enum class EDinoAwareness : uint8
 	 * what breaking line of sight buys the player. Skipping it means being seen is
 	 * always fatal.
 	 */
-	Searching	UMETA(DisplayName = "Searching")
+	Searching	UMETA(DisplayName = "Searching"),
+
+	/**
+	 * Busy in melee: attacking, holding a victim, or staggered by a hit.
+	 *
+	 * Means "not path-following" more than anything else. Stagger lives here too, because
+	 * any interruption has to pull the creature out of its Hunting move, and routing it through
+	 * the same state avoids a separate StateTree state that only exists to stand still.
+	 *
+	 * Which of those it is doing is the attack component's replicated phase.
+	 */
+	Attacking	UMETA(DisplayName = "Attacking")
 };
 
 /**
@@ -57,6 +73,7 @@ namespace DinoAwarenessTags
 	DINOGAME_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Alerted);
 	DINOGAME_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Hunting);
 	DINOGAME_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Searching);
+	DINOGAME_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Attacking);
 
 	/** Tag matching an awareness value, or an invalid tag if somehow unmapped. */
 	DINOGAME_API FGameplayTag FromAwareness(EDinoAwareness Awareness);

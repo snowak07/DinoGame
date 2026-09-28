@@ -1,7 +1,10 @@
 ﻿#include "AI/DinoAIControllerBase.h"
 
+#include "AI/DinoAttackComponent.h"
 #include "AI/DinoCreature.h"
+#include "DinoCharacter.h"
 #include "DinoGame.h"
+#include "Perception/AISense_Sight.h"
 #include "GameFramework/PlayerState.h"
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AISenseConfig_Hearing.h"
@@ -12,10 +15,18 @@
 #include "EnvironmentQuery/EnvQueryTypes.h"
 #include "NavigationSystem.h"
 #include "NavigationData.h"
+#include "Navigation/PathFollowingComponent.h"
 #include "Components/StateTreeAIComponent.h"
 
 namespace
 {
+	/**
+	 * Shortest gap between chase moves when the last one keeps ending immediately - a target on
+	 * a ledge it cannot path to, say. Short enough that a real stall is never visible, long
+	 * enough that an unreachable target costs a few queries a second rather than one a frame.
+	 */
+	constexpr double ChaseRestartInterval = 0.25;
+
 	/**
 	 * Rejects sentinel and garbage positions.
 	 *
@@ -124,7 +135,49 @@ void ADinoAIControllerBase::OnPossess(APawn* InPawn)
 		// worth leaving audible: it is the difference between "the creature has no brain"
 		// and "the creature's brain is broken", which look identical in game.
 		StateTreeAI->StartLogic();
+
+		// StartLogic fails with one LogStateTree error and nothing else - when no tree is
+		// assigned, or when the tree's schema names an AI Controller Class this controller does
+		// not inherit from (a duplicated controller Blueprint is a sibling, not a child). The
+		// creature then looks half-alive rather than broken: perception and attacks run from
+		// C++ without the tree, so it notices you and lunges, but never walks or searches.
+		if (!StateTreeAI->IsRunning())
+		{
+			DinoScreenError(FString::Printf(
+				TEXT("%s: StateTree did not start. Either none is assigned, or the tree's schema ")
+				TEXT("AI Controller Class is one this controller does not inherit from - set it to ")
+				TEXT("DinoAIControllerBase. It will perceive and attack but never move."),
+				*GetName()));
+		}
 	}
+
+	// Found rather than required: a creature with no attack component simply never attacks,
+	// which is the right answer for a herbivore.
+	AttackComponent = InPawn ? InPawn->FindComponentByClass<UDinoAttackComponent>() : nullptr;
+	if (AttackComponent)
+	{
+		AttackBeganHandle = AttackComponent->OnAttackBegan.AddUObject(this, &ADinoAIControllerBase::HandleAttackBegan);
+		AttackFinishedHandle = AttackComponent->OnAttackFinished.AddUObject(this, &ADinoAIControllerBase::HandleAttackFinished);
+	}
+
+	GetWorldTimerManager().SetTimer(CombatTimer, this, &ADinoAIControllerBase::TickCombat, 0.1f, true);
+}
+
+void ADinoAIControllerBase::OnUnPossess()
+{
+	if (AttackComponent)
+	{
+		// Unbound before cancelling, so the cancel releases any victim without the finish
+		// handler making awareness decisions for a creature that is losing its controller.
+		AttackComponent->OnAttackBegan.Remove(AttackBeganHandle);
+		AttackComponent->OnAttackFinished.Remove(AttackFinishedHandle);
+		AttackComponent->CancelAttack();
+		AttackComponent = nullptr;
+	}
+
+	GetWorldTimerManager().ClearTimer(CombatTimer);
+
+	Super::OnUnPossess();
 }
 
 bool ADinoAIControllerBase::IsValidTarget(const AActor* Actor) const
@@ -138,12 +191,32 @@ bool ADinoAIControllerBase::IsValidTarget(const AActor* Actor) const
 	// herbivore, birds scattering from a predator) is a later slice, and wants a faction
 	// concept rather than this check.
 	const APawn* AsPawn = Cast<APawn>(Actor);
-	return AsPawn && AsPawn->GetPlayerState() != nullptr;
+	if (!AsPawn || AsPawn->GetPlayerState() == nullptr)
+	{
+		return false;
+	}
+
+	if (const ADinoCharacter* Player = Cast<ADinoCharacter>(Actor))
+	{
+		if (!Player->IsAlive())
+		{
+			return false;
+		}
+
+		// Held by someone else. Held by this creature is still a valid target - it is the one
+		// being attacked.
+		if (Player->IsRestrained() && Player->GetRestrainingCreature() != GetPawn())
+		{
+			return false;
+		}
+	}
+
+	return true;
 }
 
 void ADinoAIControllerBase::HandlePerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 {
-	if (!HasAuthority() || !IsValidTarget(Actor))
+	if (!HasAuthority() || IsCreatureDead() || !IsValidTarget(Actor))
 	{
 		return;
 	}
@@ -152,38 +225,7 @@ void ADinoAIControllerBase::HandlePerceptionUpdated(AActor* Actor, FAIStimulus S
 
 	if (Stimulus.WasSuccessfullySensed())
 	{
-		const bool bIsNewEncounter = CurrentTarget != Actor;
-
-		CurrentTarget = Actor;
-		LastKnownLocation = IsUsableWorldLocation(Stimulus.StimulusLocation)
-			? Stimulus.StimulusLocation
-			: Actor->GetActorLocation();
-		bHasLiveContact = bBySight;
-
-		GetWorldTimerManager().ClearTimer(MemoryTimer);
-
-		// Regaining sight inside the persistence window cancels the pending drop, so a chase
-		// through broken cover stays one continuous hunt rather than a string of short ones.
-		GetWorldTimerManager().ClearTimer(LostSightTimer);
-
-		// Keep the eyes on the target while the body follows the path. See bTrackTargetWithEyes:
-		// without this the sight cone points along the route, not at the thing being hunted.
-		if (bBySight && bTrackTargetWithEyes)
-		{
-			SetFocus(Actor);
-		}
-
-		// A noise is a direction, not an identification: it should make a creature curious,
-		// not omniscient. Only sight escalates to a confirmed hunt.
-		SetAwareness(bBySight ? EDinoAwareness::Hunting : EDinoAwareness::Suspicious);
-
-		if (bIsNewEncounter)
-		{
-			UE_LOG(LogDinoGame, Log, TEXT("%s acquired %s by %s"),
-				*GetName(), *Actor->GetName(), bBySight ? TEXT("sight") : TEXT("sound"));
-			BP_OnTargetAcquired(Actor, bBySight);
-		}
-
+		AcquireTarget(Actor, Stimulus.StimulusLocation, bBySight);
 		return;
 	}
 
@@ -230,6 +272,13 @@ void ADinoAIControllerBase::HandlePerceptionUpdated(AActor* Actor, FAIStimulus S
 	UE_LOG(LogDinoGame, Log, TEXT("%s lost sight of %s at %s"),
 		*GetName(), *Actor->GetName(), *LastKnownLocation.ToCompactString());
 
+	// Mid-attack, record the loss and stop there. HandleAttackFinished reads bHasLiveContact
+	// and starts the search itself; doing it here would pull the creature out of its attack.
+	if (IsEngagedInAttack())
+	{
+		return;
+	}
+
 	// Hold the hunt briefly. Only from Hunting: a Suspicious creature investigating a noise has
 	// nothing to persist with, and giving it a grace period would let a sound alone keep it
 	// locked on.
@@ -242,6 +291,41 @@ void ADinoAIControllerBase::HandlePerceptionUpdated(AActor* Actor, FAIStimulus S
 	}
 
 	BeginSearching();
+}
+
+void ADinoAIControllerBase::AcquireTarget(AActor* Actor, const FVector& SensedLocation, bool bBySight)
+{
+	const bool bIsNewEncounter = CurrentTarget != Actor;
+
+	CurrentTarget = Actor;
+	LastKnownLocation = IsUsableWorldLocation(SensedLocation)
+		? SensedLocation
+		: Actor->GetActorLocation();
+	bHasLiveContact = bBySight;
+
+	GetWorldTimerManager().ClearTimer(MemoryTimer);
+
+	// Regaining sight inside the persistence window cancels the pending drop, so a chase
+	// through broken cover stays one continuous hunt rather than a string of short ones.
+	GetWorldTimerManager().ClearTimer(LostSightTimer);
+
+	// Keep the eyes on the target while the body follows the path. See bTrackTargetWithEyes:
+	// without this the sight cone points along the route, not at the thing being hunted.
+	if (bBySight && bTrackTargetWithEyes)
+	{
+		SetFocus(Actor);
+	}
+
+	// A noise is a direction, not an identification: it should make a creature curious,
+	// not omniscient. Only sight escalates to a confirmed hunt.
+	SetAwareness(bBySight ? EDinoAwareness::Hunting : EDinoAwareness::Suspicious);
+
+	if (bIsNewEncounter)
+	{
+		UE_LOG(LogDinoGame, Log, TEXT("%s acquired %s by %s"),
+			*GetName(), *Actor->GetName(), bBySight ? TEXT("sight") : TEXT("sound"));
+		BP_OnTargetAcquired(Actor, bBySight);
+	}
 }
 
 void ADinoAIControllerBase::BeginSearching()
@@ -302,6 +386,13 @@ void ADinoAIControllerBase::SetAwareness(EDinoAwareness NewAwareness)
 		return;
 	}
 
+	// The same idea for attacks: see IsEngagedInAttack. HandleAttackFinished runs after the
+	// component is free again, so it is never blocked by this.
+	if (IsEngagedInAttack() && NewAwareness != EDinoAwareness::Attacking)
+	{
+		return;
+	}
+
 	ApplyAwareness(NewAwareness);
 }
 
@@ -325,10 +416,13 @@ void ADinoAIControllerBase::DebugReleaseAwareness()
 	bAwarenessLocked = false;
 
 	// Re-derive from what perception currently knows, rather than leaving the forced state
-	// sitting there until the next stimulus happens to arrive.
-	ApplyAwareness(bHasLiveContact
-		? EDinoAwareness::Hunting
-		: (CurrentTarget ? EDinoAwareness::Searching : EDinoAwareness::Unaware));
+	// sitting there until the next stimulus happens to arrive. Mid-attack, stay in Attacking and
+	// let the attack's own finish decide - leaving now would cancel it.
+	ApplyAwareness(IsEngagedInAttack()
+		? EDinoAwareness::Attacking
+		: (bHasLiveContact
+			? EDinoAwareness::Hunting
+			: (CurrentTarget ? EDinoAwareness::Searching : EDinoAwareness::Unaware)));
 
 	DinoScreenLog(FString::Printf(TEXT("%s released to perception"), *GetName()), FColor::White, 8.0f);
 }
@@ -368,14 +462,287 @@ FString ADinoAIControllerBase::DescribeState() const
 		? Creature->SpeciesName
 		: FName(Creature ? *Creature->GetClass()->GetName() : TEXT("<no pawn>"));
 
-	return FString::Printf(TEXT("%s: %s%s | target=%s | contact=%s | lastKnown=%s | goal=%s"),
+	FString AttackText = AttackComponent ? AttackComponent->DescribeAttack() : FString();
+	if (bChasing)
+	{
+		AttackText = AttackText.IsEmpty() ? DescribeChase() : AttackText + TEXT(" | ") + DescribeChase();
+	}
+
+	return FString::Printf(TEXT("%s: %s%s | target=%s | contact=%s | lastKnown=%s | goal=%s%s%s"),
 		*Species.ToString(),
 		*DinoAwarenessName(GetAwareness()),
 		bAwarenessLocked ? TEXT(" [LOCKED]") : TEXT(""),
 		CurrentTarget ? *CurrentTarget->GetName() : TEXT("none"),
 		bHasLiveContact ? TEXT("live") : TEXT("memory"),
 		CurrentTarget ? *LastKnownLocation.ToCompactString() : TEXT("-"),
-		*ActiveSearchDestination.ToCompactString());
+		*ActiveSearchDestination.ToCompactString(),
+		AttackText.IsEmpty() ? TEXT("") : TEXT(" | "),
+		*AttackText);
+}
+
+// --- Combat ----------------------------------------------------------------------------------
+
+bool ADinoAIControllerBase::IsEngagedInAttack() const
+{
+	return AttackComponent && AttackComponent->IsBusy();
+}
+
+bool ADinoAIControllerBase::IsCreatureDead() const
+{
+	const ADinoCreature* Creature = Cast<ADinoCreature>(GetPawn());
+	return Creature && Creature->IsDead();
+}
+
+void ADinoAIControllerBase::TickCombat()
+{
+	if (IsCreatureDead())
+	{
+		return;
+	}
+
+	// A target that died or was grabbed by another creature mid-hunt. Mid-attack, leave it to
+	// HandleAttackFinished instead, so the attack plays out rather than snapping to idle.
+	if (CurrentTarget && !IsEngagedInAttack() && !IsValidTarget(CurrentTarget))
+	{
+		DropCurrentTarget(TEXT("target is no longer valid"));
+	}
+
+	// Under a debug lock the StateTree task drives attacks instead, so a forced state is not
+	// fought by the normal triggers.
+	if (!AttackComponent || bAwarenessLocked)
+	{
+		return;
+	}
+
+	AttackComponent->TryStartAttack(false);
+}
+
+void ADinoAIControllerBase::HandleAttackBegan(ADinoCharacter* Victim)
+{
+	// Null for a stagger. For a real attack the victim becomes the target, whoever the
+	// creature was chasing before - a devour can catch someone it had not even noticed.
+	if (Victim)
+	{
+		CurrentTarget = Victim;
+		LastKnownLocation = Victim->GetActorLocation();
+
+		// Whatever was counting down toward giving up no longer applies: it has someone.
+		GetWorldTimerManager().ClearTimer(MemoryTimer);
+		GetWorldTimerManager().ClearTimer(LostSightTimer);
+
+		if (bTrackTargetWithEyes)
+		{
+			SetFocus(Victim);
+		}
+	}
+
+	SetAwareness(EDinoAwareness::Attacking);
+}
+
+void ADinoAIControllerBase::HandleAttackFinished(EDinoAttackOutcome Outcome)
+{
+	UE_LOG(LogDinoGame, Log, TEXT("%s attack over (%s), target %s, contact %s."), *GetName(),
+		*UEnum::GetDisplayValueAsText(Outcome).ToString(), *GetNameSafe(CurrentTarget),
+		bHasLiveContact ? TEXT("live") : TEXT("lost"));
+
+	// A locked state stays where the debug command put it; the task will attack again.
+	if (IsCreatureDead() || bAwarenessLocked)
+	{
+		return;
+	}
+
+	if (CurrentTarget && !IsValidTarget(CurrentTarget))
+	{
+		DropCurrentTarget(Outcome == EDinoAttackOutcome::Killed ? TEXT("killed it") : TEXT("target no longer valid"));
+		return;
+	}
+
+	if (!CurrentTarget)
+	{
+		DropCurrentTarget(TEXT("no target after attack"));
+		return;
+	}
+
+	if (bHasLiveContact)
+	{
+		SetAwareness(EDinoAwareness::Hunting);
+		if (bTrackTargetWithEyes)
+		{
+			SetFocus(CurrentTarget);
+		}
+		return;
+	}
+
+	// Sight was lost during the attack - the loss was recorded but deliberately not acted on.
+	BeginSearching();
+}
+
+void ADinoAIControllerBase::DropCurrentTarget(const TCHAR* Reason)
+{
+	UE_LOG(LogDinoGame, Log, TEXT("%s dropping %s: %s."), *GetName(), *GetNameSafe(CurrentTarget), Reason);
+
+	GetWorldTimerManager().ClearTimer(MemoryTimer);
+	GetWorldTimerManager().ClearTimer(LostSightTimer);
+	ClearFocus(EAIFocusPriority::Gameplay);
+
+	CurrentTarget = nullptr;
+	bHasLiveContact = false;
+
+	// In co-op the next player is usually standing right there. Without this the creature
+	// would go idle and stare at them until they happened to leave its sight and come back,
+	// because perception only reports changes.
+	if (TryAcquireVisibleTarget())
+	{
+		return;
+	}
+
+	SetAwareness(EDinoAwareness::Unaware);
+	BP_OnTargetForgotten();
+}
+
+bool ADinoAIControllerBase::TryAcquireVisibleTarget()
+{
+	const APawn* Self = GetPawn();
+	if (!Perception || !Self)
+	{
+		return false;
+	}
+
+	TArray<AActor*> InSight;
+	Perception->GetCurrentlyPerceivedActors(UAISense_Sight::StaticClass(), InSight);
+
+	AActor* Nearest = nullptr;
+	float NearestDistance = TNumericLimits<float>::Max();
+
+	for (AActor* Candidate : InSight)
+	{
+		if (!IsValidTarget(Candidate))
+		{
+			continue;
+		}
+
+		const float Distance = FVector::DistSquared(Self->GetActorLocation(), Candidate->GetActorLocation());
+		if (Distance < NearestDistance)
+		{
+			NearestDistance = Distance;
+			Nearest = Candidate;
+		}
+	}
+
+	if (!Nearest)
+	{
+		return false;
+	}
+
+	AcquireTarget(Nearest, Nearest->GetActorLocation(), true);
+	return true;
+}
+
+// --- Chasing ----------------------------------------------------------------------------------
+
+void ADinoAIControllerBase::MaintainChase(const FAIMoveRequest& Request, bool bForceNewMove)
+{
+	const double Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
+	const bool bGoalChanged = Request.GetGoalActor() != ChaseGoal.Get();
+	const bool bMoveEnded = GetMoveStatus() == EPathFollowingStatus::Idle;
+
+	bChasing = true;
+
+	if (!bForceNewMove && !bGoalChanged)
+	{
+		if (!bMoveEnded || Now - LastChaseMoveTime < ChaseRestartInterval)
+		{
+			return;
+		}
+
+		// A move ended on its own and the creature is still hunting - exactly the case that
+		// used to stall. Counted, because a rising number is the proof this is being hit.
+		++ChaseRestarts;
+	}
+
+	const FPathFollowingRequestResult Result = MoveTo(Request);
+
+	ChaseGoal = Request.GetGoalActor();
+	LastChaseMoveTime = Now;
+	++ChaseMovesIssued;
+
+	switch (Result.Code)
+	{
+	case EPathFollowingRequestResult::Failed:            LastChaseRequest = TEXT("no path"); break;
+	case EPathFollowingRequestResult::AlreadyAtGoal:     LastChaseRequest = TEXT("already there"); break;
+	case EPathFollowingRequestResult::RequestSuccessful: LastChaseRequest = TEXT("moving"); break;
+	default:                                              LastChaseRequest = TEXT("?"); break;
+	}
+
+	// Partial means the target is somewhere this creature cannot actually reach, so it is
+	// heading for the nearest point it can. Surfaced because it looks identical to a creature
+	// that is simply bad at pathing.
+	const UPathFollowingComponent* PathFollowing = GetPathFollowingComponent();
+	const FNavPathSharedPtr Path = PathFollowing ? PathFollowing->GetPath() : nullptr;
+	bChasePathPartial = Result.Code == EPathFollowingRequestResult::RequestSuccessful
+		&& Path.IsValid() && Path->IsPartial();
+}
+
+void ADinoAIControllerBase::StopChase()
+{
+	if (!bChasing)
+	{
+		return;
+	}
+
+	bChasing = false;
+	ChaseGoal.Reset();
+	StopMovement();
+}
+
+FString ADinoAIControllerBase::DescribeChase() const
+{
+	return FString::Printf(TEXT("chase: %d moves (%d restarts)  %s%s  last end: %s"),
+		ChaseMovesIssued, ChaseRestarts, *LastChaseRequest,
+		bChasePathPartial ? TEXT(" PARTIAL") : TEXT(""),
+		*LastMoveEnd);
+}
+
+void ADinoAIControllerBase::OnMoveCompleted(FAIRequestID RequestID, const FPathFollowingResult& Result)
+{
+	Super::OnMoveCompleted(RequestID, Result);
+
+	LastMoveEnd = Result.ToString();
+}
+
+bool ADinoAIControllerBase::TryStartForcedAttack()
+{
+	return AttackComponent && AttackComponent->TryStartAttack(true);
+}
+
+void ADinoAIControllerBase::CancelAttackFromStateTree()
+{
+	if (AttackComponent)
+	{
+		AttackComponent->CancelAttack();
+	}
+}
+
+void ADinoAIControllerBase::HandleCreatureDied()
+{
+	GetWorldTimerManager().ClearTimer(CombatTimer);
+	GetWorldTimerManager().ClearTimer(MemoryTimer);
+	GetWorldTimerManager().ClearTimer(LostSightTimer);
+	GetWorldTimerManager().ClearTimer(SearchLegTimer);
+
+	StopMovement();
+	ClearFocus(EAIFocusPriority::Gameplay);
+
+	CurrentTarget = nullptr;
+	bHasLiveContact = false;
+
+	if (StateTreeAI)
+	{
+		StateTreeAI->StopLogic(TEXT("Creature died"));
+	}
+
+	// Past the lock and the engaged guard: nothing a dead creature was doing should survive.
+	ApplyAwareness(EDinoAwareness::Unaware);
 }
 
 // --- Searching -------------------------------------------------------------------------------
@@ -668,7 +1035,12 @@ void ADinoAIControllerBase::RunSetupCheck(TArray<FString>& OutLines) const
 	// A tree that is not Running means every state is inert, whatever the states contain.
 	const EStateTreeRunStatus TreeStatus = StateTreeAI ? StateTreeAI->GetStateTreeRunStatus() : EStateTreeRunStatus::Unset;
 	Report(TreeStatus == EStateTreeRunStatus::Running, TEXT("StateTree running"),
-		StateTreeAI ? UEnum::GetDisplayValueAsText(TreeStatus).ToString() : FString(TEXT("no component")));
+		!StateTreeAI
+			? FString(TEXT("no component"))
+			: TreeStatus == EStateTreeRunStatus::Running
+				? FString(TEXT("Running"))
+				: FString::Printf(TEXT("%s - no tree assigned, or its schema AI Controller Class does not match this controller"),
+					*UEnum::GetDisplayValueAsText(TreeStatus).ToString()));
 
 	Report(SearchQuery != nullptr, TEXT("search EQS query assigned"),
 		SearchQuery ? SearchQuery->GetName() : FString(TEXT("using random-wander fallback")));
@@ -700,6 +1072,21 @@ void ADinoAIControllerBase::RunSetupCheck(TArray<FString>& OutLines) const
 		bAwarenessLocked ? TEXT("DinoSetState auto to release") : TEXT(""));
 
 	Report(Perception != nullptr, TEXT("perception component"), TEXT(""));
+
+	// A FAIL rather than a note, because every creature this check exists for is a predator.
+	// A herbivore will fail it by design - read it as "will never attack", not as broken.
+	Report(AttackComponent != nullptr, TEXT("attack component"),
+		AttackComponent
+			? AttackComponent->GetClass()->GetName()
+			: FString(TEXT("none on the pawn - this creature will never attack")));
+	if (AttackComponent)
+	{
+		AttackComponent->AppendSetupCheck(OutLines);
+	}
+	if (Creature)
+	{
+		OutLines.Add(FString::Printf(TEXT("vulnerability: %s"), *Creature->DescribeVulnerability()));
+	}
 
 	// Checked explicitly because its failure is silent and total: with the controller not
 	// ticking, UpdateControlRotation never runs and the sight cone stays frozen at the spawn

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "CoreMinimal.h"
 #include "GameFramework/PlayerController.h"
@@ -103,6 +103,17 @@ public:
 	 */
 	UFUNCTION(Exec)
 	void DinoSetState(const FString& DesiredState);
+
+	/**
+	 * Hits the nearest living creature for Damage, e.g. "DinoHitDino 25".
+	 *
+	 * TODO(combat): stand-in for player attacks, which do not exist yet. Goes through
+	 * UGameplayStatics::ApplyDamage - exactly the path a weapon will use - so everything behind
+	 * it (stagger, pin release, creature death) is exercised for real, and a weapon replaces
+	 * only this command.
+	 */
+	UFUNCTION(Exec)
+	void DinoHitDino(float Damage = 25.0f);
 
 	/** Re-shows the build version on screen. Not scaffolding — playtesters need this. */
 	UFUNCTION(Exec)
