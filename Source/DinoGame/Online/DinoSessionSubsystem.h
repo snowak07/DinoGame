@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "CoreMinimal.h"
 #include "Subsystems/GameInstanceSubsystem.h"
@@ -37,7 +37,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FDinoSessionSearchResult, bool, bWa
  * Player-hosted session management, wrapping IOnlineSession so gameplay never references a
  * specific backend. Steam today; swapping DefaultPlatformService is enough to move to EOS.
  */
-UCLASS()
+UCLASS(Config = Game)
 class DINOGAME_API UDinoSessionSubsystem : public UGameInstanceSubsystem
 {
 	GENERATED_BODY()
@@ -56,6 +56,23 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Dino|Sessions")
 	void LeaveSession();
+
+	/**
+	 * Leaves any session and opens the main menu. What the session menu's Leave button does.
+	 * Works with no session too, as in solo PIE, where there is nothing to leave.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Dino|Sessions")
+	void ReturnToMainMenu();
+
+	/**
+	 * The map hosting travels to when no map is named.
+	 *
+	 * Configured rather than read from the current world because hosting now starts on the
+	 * main menu, and "the map already loaded" would host the menu itself. Override in
+	 * DefaultGame.ini under [/Script/DinoGame.DinoSessionSubsystem].
+	 */
+	UPROPERTY(Config)
+	FString GameplayMap = TEXT("/Game/FirstPerson/Lvl_FirstPerson");
 
 	UFUNCTION(BlueprintPure, Category = "Dino|Sessions")
 	bool IsInSession() const;
@@ -129,6 +146,9 @@ private:
 	void HandleFindComplete(bool bWasSuccessful);
 	void HandleJoinComplete(FName SessionName, EOnJoinSessionCompleteResult::Type Result);
 	void HandleDestroyComplete(FName SessionName, bool bWasSuccessful);
+
+	/** Opens the game's default map, which is the main menu. No-op when already there. */
+	void OpenMainMenu();
 
 	FDelegateHandle CreateHandle;
 	FDelegateHandle FindHandle;

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using UnrealBuildTool;
 
@@ -29,7 +29,10 @@ public class DinoGame : ModuleRules
 			// but UNavigationInvokerComponent and the navmesh types live here.
 			"NavigationSystem",
 			// Native gameplay tags, used to drive StateTree transitions by event.
-			"GameplayTags"
+			"GameplayTags",
+			// UGameMapsSettings, so leaving a session can find the main menu from the same
+			// GameDefaultMap setting the engine boots into, rather than a second copy of it.
+			"EngineSettings"
 		});
 
 		PublicIncludePaths.AddRange(new string[] {

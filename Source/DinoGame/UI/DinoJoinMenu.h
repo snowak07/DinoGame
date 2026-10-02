@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
@@ -30,6 +30,12 @@ public:
 	/** Hides the menu and returns input to the game. */
 	UFUNCTION(BlueprintCallable, Category = "Dino|UI")
 	void HideMenu();
+
+	/**
+	 * On the main menu this is the whole screen, so Escape must not dismiss it into an empty
+	 * level with nothing to do and no way back.
+	 */
+	void SetMainMenuMode(bool bInMainMenuMode) { bMainMenuMode = bInMainMenuMode; }
 
 protected:
 	virtual void NativeConstruct() override;
@@ -68,12 +74,19 @@ protected:
 	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> VersionText;
 
+	/** Optional. Quits the game. Mainly for the main menu, where nothing else can. */
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UButton> QuitButton;
+
 private:
 	UFUNCTION()
 	void HandleHostClicked();
 
 	UFUNCTION()
 	void HandleJoinClicked();
+
+	UFUNCTION()
+	void HandleQuitClicked();
 
 	UFUNCTION()
 	void HandleCodeTextChanged(const FText& Text);
@@ -93,4 +106,6 @@ private:
 
 	/** True between a button press and its completion delegate. */
 	bool bBusy = false;
+
+	bool bMainMenuMode = false;
 };

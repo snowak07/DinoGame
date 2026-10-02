@@ -1,4 +1,4 @@
-# Console commands
+﻿# Console commands
 
 ## Opening the console
 
@@ -66,14 +66,14 @@ everywhere.
 
 | Command | |
 |---|---|
-| `DinoHost` | Host the current map with 4 slots and print the join code |
+| `DinoHost` | Host the gameplay map (`Lvl_FirstPerson`) with 4 slots and print the join code |
 | `DinoHostMap <map> [slots]` | Host a specific map, e.g. `DinoHostMap Lvl_FirstPerson 4`. Slots default to 4 |
 | `DinoCode` | Show your join code again |
 | `DinoJoinCode <code>` | Join by code, e.g. `DinoJoinCode K7M2PQ`. Case and separators are ignored |
 | `DinoFind` | List sessions found |
 | `DinoJoin [index]` | Join a session from the `DinoFind` list. Index defaults to 0 |
-| `DinoLeave` | Leave the session |
-| `DinoMenu` | Open the host/join menu |
+| `DinoLeave` | Leave the session and return to the main menu |
+| `DinoMenu` | Same as Tab: the session menu during a match, the host/join menu anywhere else |
 | `DinoNetStatus` | Build, backend, net mode, net driver, connections |
 | `DinoVoiceStatus` | Voice config and who is talking |
 
@@ -81,6 +81,36 @@ In `DinoNetStatus`, `net driver : SteamSocketsNetDriver` means traffic is on Ste
 `IpNetDriver` means it silently fell back to raw IP.
 
 `DinoFind` and `DinoJoin` are scaffolding from before the join menu and will be removed.
+
+---
+
+## Rounds
+
+| Command | Host only | |
+|---|---|---|
+| `DinoStartRound` | yes | Start the round from the lobby. Same as the Start Round button |
+| `DinoRestartRound` | yes | Reload the map straight into a new round |
+| `DinoLobby` | yes | Reload the map into the lobby |
+
+The same three are buttons on the **Tab menu**, shown to the host only.
+
+Playing in the editor starts in the lobby, so `DinoStartRound` (or the button) is the first
+thing to do in any solo test.
+
+### Spectator controls
+
+Dead players, lobby players and late joiners watch through the spectator camera.
+
+| Input | |
+|---|---|
+| **Space** | Cycle camera: Follow a teammate → Free fly → Overhead |
+| **LMB / RMB** | Next / previous living teammate |
+| **Mouse** | Orbit the teammate (Follow), or look (Free) |
+| **WASD, Q / E** | Fly, and down / up (Free) |
+| **Tab** | The session menu |
+
+The overhead view uses an actor tagged `DinoOverhead` if the level has one (normally a placed
+Camera Actor), and otherwise frames everyone from high above.
 
 ---
 

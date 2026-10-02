@@ -4,6 +4,7 @@
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "DinoGame.h"
+#include "DinoGameMode.h"
 #include "DinoPlayerState.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
@@ -222,6 +223,12 @@ void ADinoCharacter::HandleDeath()
 		if (ADinoPlayerState* DinoState = GetPlayerState<ADinoPlayerState>())
 		{
 			DinoState->SetIsAlive(false);
+		}
+
+		// After SetIsAlive, so the game mode's round-over check already counts this player out.
+		if (ADinoGameMode* GameMode = GetWorld() ? GetWorld()->GetAuthGameMode<ADinoGameMode>() : nullptr)
+		{
+			GameMode->NotifyPlayerDied(GetController());
 		}
 	}
 }

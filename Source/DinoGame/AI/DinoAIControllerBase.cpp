@@ -190,25 +190,22 @@ bool ADinoAIControllerBase::IsValidTarget(const AActor* Actor) const
 	// Players only for now. Creature-versus-creature perception (a raptor noticing a
 	// herbivore, birds scattering from a predator) is a later slice, and wants a faction
 	// concept rather than this check.
-	const APawn* AsPawn = Cast<APawn>(Actor);
-	if (!AsPawn || AsPawn->GetPlayerState() == nullptr)
+	//
+	// A player *character*, not any pawn with a player behind it. AI sight registers every pawn
+	// in the world as visible by default (UAISense_Sight::bAutoRegisterAllPawnsAsSources), and
+	// a spectator camera is a pawn possessed by a player - so the looser rule had creatures
+	// hunting the host's spectator camera around the lobby.
+	const ADinoCharacter* Player = Cast<ADinoCharacter>(Actor);
+	if (!Player || Player->GetPlayerState() == nullptr || !Player->IsAlive())
 	{
 		return false;
 	}
 
-	if (const ADinoCharacter* Player = Cast<ADinoCharacter>(Actor))
+	// Held by someone else. Held by this creature is still a valid target - it is the one being
+	// attacked.
+	if (Player->IsRestrained() && Player->GetRestrainingCreature() != GetPawn())
 	{
-		if (!Player->IsAlive())
-		{
-			return false;
-		}
-
-		// Held by someone else. Held by this creature is still a valid target - it is the one
-		// being attacked.
-		if (Player->IsRestrained() && Player->GetRestrainingCreature() != GetPawn())
-		{
-			return false;
-		}
+		return false;
 	}
 
 	return true;

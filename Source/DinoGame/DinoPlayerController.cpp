@@ -3,6 +3,13 @@
 #include "DinoBuildInfo.h"
 #include "DinoCharacter.h"
 #include "DinoGame.h"
+#include "DinoGameMode.h"
+#include "DinoGameState.h"
+#include "DinoSpectatorPawn.h"
+#include "GameFramework/GameMode.h"
+#include "TimerManager.h"
+#include "UI/DinoSessionMenu.h"
+#include "UI/DinoSpectatorOverlay.h"
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
@@ -30,6 +37,8 @@ void ADinoPlayerController::BeginPlay()
 	{
 		UE_LOG(LogDinoGame, Log, TEXT("Build version: %s"), *UDinoBuildInfo::GetBuildVersion());
 		ShowBuildVersionOnScreen();
+
+		GetWorldTimerManager().SetTimer(SessionUITimer, this, &ADinoPlayerController::PollSessionUI, 0.25f, true);
 	}
 }
 
@@ -86,8 +95,23 @@ void ADinoPlayerController::EnableOpenMic()
 
 void ADinoPlayerController::ToggleJoinMenu()
 {
-	if (!IsLocalController())
+	if (!IsLocalController() || bOnMainMenu)
 	{
+		return;
+	}
+
+	// In a match there is nothing to host or join - you are already in one. The key becomes the
+	// session menu instead.
+	if (GetWorld() && GetWorld()->GetGameState<ADinoGameState>())
+	{
+		if (SessionMenu && SessionMenu->IsOpen())
+		{
+			CloseSessionMenu();
+		}
+		else
+		{
+			OpenSessionMenu();
+		}
 		return;
 	}
 
@@ -112,6 +136,198 @@ void ADinoPlayerController::ToggleJoinMenu()
 	{
 		JoinMenu->ShowMenu();
 	}
+}
+
+void ADinoPlayerController::ClientShowMainMenu_Implementation()
+{
+	bOnMainMenu = true;
+
+	// Next tick, not now: this arrives from PostLogin, which can run before the controller has
+	// begun play, and a widget created then has no viewport to go into.
+	GetWorldTimerManager().SetTimerForNextTick(this, &ADinoPlayerController::ShowMainMenu);
+}
+
+void ADinoPlayerController::ShowMainMenu()
+{
+	if (!JoinMenuClass)
+	{
+		DinoScreenError(TEXT("No join menu set. Assign JoinMenuClass on BP_FirstPersonPlayerController, ")
+			TEXT("and make sure BP_MenuGameMode uses that controller."));
+		return;
+	}
+
+	if (!JoinMenu)
+	{
+		JoinMenu = CreateWidget<UDinoJoinMenu>(this, JoinMenuClass);
+	}
+
+	if (JoinMenu)
+	{
+		JoinMenu->SetMainMenuMode(true);
+		JoinMenu->ShowMenu();
+	}
+}
+
+// --- Session UI ------------------------------------------------------------------------------
+
+void ADinoPlayerController::OpenSessionMenu()
+{
+	if (!SessionMenu)
+	{
+		SessionMenu = CreateWidget<UDinoSessionMenu>(this, UDinoSessionMenu::StaticClass());
+	}
+
+	if (SessionMenu)
+	{
+		SessionMenu->Open();
+	}
+}
+
+void ADinoPlayerController::CloseSessionMenu()
+{
+	if (SessionMenu && SessionMenu->IsOpen())
+	{
+		SessionMenu->Close();
+	}
+}
+
+void ADinoPlayerController::PollSessionUI()
+{
+	const UWorld* World = GetWorld();
+	const ADinoGameState* DinoState = World ? World->GetGameState<ADinoGameState>() : nullptr;
+	if (bOnMainMenu || !DinoState)
+	{
+		return;
+	}
+
+	const FName CurrentState = DinoState->GetMatchState();
+	if (CurrentState != LastSeenMatchState)
+	{
+		LastSeenMatchState = CurrentState;
+
+		if (CurrentState == MatchState::WaitingToStart || CurrentState == MatchState::WaitingPostMatch)
+		{
+			OpenSessionMenu();
+		}
+		else if (CurrentState == MatchState::InProgress)
+		{
+			CloseSessionMenu();
+		}
+	}
+
+	// Not in the lobby, where the session menu is already the whole screen.
+	const bool bWantOverlay = IsInState(NAME_Spectating)
+		&& GetSpectatorPawn() != nullptr
+		&& CurrentState != MatchState::WaitingToStart;
+
+	const bool bHasOverlay = SpectatorOverlay && SpectatorOverlay->IsInViewport();
+	if (bWantOverlay && !bHasOverlay)
+	{
+		if (!SpectatorOverlay)
+		{
+			SpectatorOverlay = CreateWidget<UDinoSpectatorOverlay>(this, UDinoSpectatorOverlay::StaticClass());
+		}
+		if (SpectatorOverlay)
+		{
+			SpectatorOverlay->AddToViewport(0);
+		}
+	}
+	else if (!bWantOverlay && bHasOverlay)
+	{
+		SpectatorOverlay->RemoveFromParent();
+	}
+}
+
+void ADinoPlayerController::BeginSpectatingState()
+{
+	Super::BeginSpectatingState();
+
+	if (IsLocalController())
+	{
+		// Move-ignore is a counter. A restraint raises it and its release lowers it, but dying
+		// mid-pin is exactly the case where the pairing is most fragile, and a counter left at
+		// one would freeze the spectator camera's fly controls for the rest of the session.
+		ResetIgnoreInputFlags();
+	}
+}
+
+// --- Round requests --------------------------------------------------------------------------
+
+namespace
+{
+	/**
+	 * The host's controller is the only one local to a listen server; every remote player's
+	 * controller is not. In standalone the only player is the host.
+	 */
+	ADinoGameMode* GetGameModeForHost(const APlayerController& Requester, const TCHAR* Action)
+	{
+		if (!Requester.IsLocalController())
+		{
+			UE_LOG(LogDinoNet, Warning, TEXT("Rejected %s from %s - only the host can do that."),
+				Action, *Requester.GetName());
+			return nullptr;
+		}
+
+		const UWorld* World = Requester.GetWorld();
+		return World ? World->GetAuthGameMode<ADinoGameMode>() : nullptr;
+	}
+}
+
+void ADinoPlayerController::ServerStartRound_Implementation()
+{
+	if (ADinoGameMode* GameMode = GetGameModeForHost(*this, TEXT("start round")))
+	{
+		if (!GameMode->StartRound())
+		{
+			DinoScreenError(TEXT("A round can only be started from the lobby."));
+		}
+	}
+}
+
+void ADinoPlayerController::ServerRestartRound_Implementation()
+{
+	if (ADinoGameMode* GameMode = GetGameModeForHost(*this, TEXT("restart round")))
+	{
+		GameMode->RestartRound();
+	}
+}
+
+void ADinoPlayerController::ServerReturnToLobby_Implementation()
+{
+	if (ADinoGameMode* GameMode = GetGameModeForHost(*this, TEXT("return to lobby")))
+	{
+		GameMode->ReturnToLobby();
+	}
+}
+
+void ADinoPlayerController::DinoStartRound()
+{
+	if (!HasAuthority())
+	{
+		DinoScreenError(TEXT("DinoStartRound only works on the host."));
+		return;
+	}
+	ServerStartRound();
+}
+
+void ADinoPlayerController::DinoRestartRound()
+{
+	if (!HasAuthority())
+	{
+		DinoScreenError(TEXT("DinoRestartRound only works on the host."));
+		return;
+	}
+	ServerRestartRound();
+}
+
+void ADinoPlayerController::DinoLobby()
+{
+	if (!HasAuthority())
+	{
+		DinoScreenError(TEXT("DinoLobby only works on the host."));
+		return;
+	}
+	ServerReturnToLobby();
 }
 
 void ADinoPlayerController::AcknowledgePossession(APawn* NewPawn)

@@ -52,6 +52,12 @@ inherits from — a new `UPROPERTY`, a new component — requires it.
 open. What actually blocks a game-target build is a running packaged `DinoGame.exe` holding
 `Binaries/Win64/DinoGame.exe` open. Check for `DinoGame` processes, not the editor.
 
+**A map reached only by travel is not packaged unless it is listed.** The cooker includes the
+default map and what it references; a map you `ServerTravel` to by path is referenced by
+nothing. List every playable map under `MapsToCook` in `Config/DefaultGame.ini`. Missing, the
+package builds cleanly and then hosting logs `TickWorldTravel failed ... Failed to load` and
+drops back to the default map — which looks like a broken menu, not a missing map.
+
 **Config is baked into the `.pak`.** A packaged build contains no loose `.ini` files, so any
 `Config/*.ini` change needs a full repackage. Copying just the exe ships new code with old
 config, and fails silently.
@@ -93,6 +99,44 @@ developers' lobbies. That is why joining is by **join code** rather than a serve
 - **Steam lobby search is region-limited.** `AddRequestLobbyListDistanceFilter` is hardcoded in
   the engine with no config hook, so a distant tester may not find a lobby even with a correct
   code.
+
+---
+
+## Rounds
+
+**Main menu → lobby → round → spectate → round over → restart.** The game boots into
+`Lvl_MainMenu` (`GameDefaultMap`); the editor still opens `Lvl_FirstPerson`, so Play in the
+editor goes straight to the lobby.
+
+`ADinoGameMode` is an **`AGameMode`**, for its replicated match state machine: `WaitingToStart`
+is the lobby (held there by `bDelayedStart` until the host starts), `InProgress` a round,
+`WaitingPostMatch` round over. Restarting reloads the map with `ServerTravel` rather than
+resetting actors by hand.
+
+### Traps here
+
+- **`AGameMode` needs an `AGameState`.** Pairing it with an `AGameStateBase` logs an error and
+  the match state never reaches clients. `ADinoGameState` derives from `AGameState` for this.
+- **AI sight registers every pawn**, spectator cameras included
+  (`UAISense_Sight::bAutoRegisterAllPawnsAsSources`), and a spectator pawn has a player behind
+  it. Targeting must check for a living `ADinoCharacter`, not "a pawn with a player" — the
+  looser rule had dinos hunting the host's spectator camera.
+- **`bIsAlive` means "has a living character this round"** and defaults to false. Any looser
+  meaning counts lobby players and late joiners as alive, and the round can never end.
+- **PlayerCanRestart is the only spawn gate**, and the engine also asks it for late joiners and
+  for a dead client clicking. It returns true only inside `HandleMatchHasStarted`.
+- **Seamless travel is off in PIE** (`net.AllowPIESeamlessTravel`), so an editor restart is a
+  full reconnect. Auto-starting the next round therefore waits for a head count carried in the
+  travel URL, not just `NumTravellingPlayers`.
+- **Restarts are relative travels, which inherit the previous URL's options** — that is what
+  keeps `?listen`. Any option meant to be one-shot has to be written explicitly every time,
+  even as `=0`, or the last restart's value carries over.
+- **After a seamless restart `PostLogin` is skipped**; per-player setup belongs in
+  `HandleStartingNewPlayer`, which both paths reach.
+
+The new screens (`UDinoSessionMenu`, `UDinoSpectatorOverlay`) are laid out in C++ with
+`WidgetTree->ConstructWidget` — no Blueprint to keep in step. Spectator controls are input
+actions created at runtime in `ADinoSpectatorPawn`, so no input assets either.
 
 ---
 

@@ -7,6 +7,7 @@ void ADinoPlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
 	DOREPLIFETIME(ADinoPlayerState, bIsAlive);
+	DOREPLIFETIME(ADinoPlayerState, bIsHost);
 }
 
 void ADinoPlayerState::SetIsAlive(bool bNewIsAlive)
@@ -21,6 +22,14 @@ void ADinoPlayerState::SetIsAlive(bool bNewIsAlive)
 	// RepNotifies do not fire on the authority that set the value, so broadcast here to keep
 	// listen-server and client behaviour identical.
 	OnAliveStateChanged.Broadcast(bIsAlive);
+}
+
+void ADinoPlayerState::SetIsHost(bool bNewIsHost)
+{
+	if (HasAuthority())
+	{
+		bIsHost = bNewIsHost;
+	}
 }
 
 void ADinoPlayerState::OnRep_IsAlive()

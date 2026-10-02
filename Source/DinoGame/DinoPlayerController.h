@@ -22,9 +22,31 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|UI")
 	TSubclassOf<class UDinoJoinMenu> JoinMenuClass;
 
-	/** Opens the menu, or closes it if already open. Bind this to a key in Blueprint. */
+	/**
+	 * The menu key (Tab, bound in Blueprint). Opens the in-session menu during a match - lobby,
+	 * round, round over - and the host/join menu anywhere else. Does nothing on the main menu,
+	 * where the host/join menu is always up.
+	 */
 	UFUNCTION(BlueprintCallable, Category = "Dino|UI")
 	void ToggleJoinMenu();
+
+	/** Sent by ADinoMenuGameMode: this player is on the main menu. */
+	UFUNCTION(Client, Reliable)
+	void ClientShowMainMenu();
+
+	// --- Rounds ------------------------------------------------------------------------------
+	// Host requests. Server RPCs so the session menu can call them the same way on every machine,
+	// and each one re-checks on the server that the caller really is the host - a client whose
+	// UI was tampered with, or simply out of date, must not be able to restart the round.
+
+	UFUNCTION(Server, Reliable)
+	void ServerStartRound();
+
+	UFUNCTION(Server, Reliable)
+	void ServerRestartRound();
+
+	UFUNCTION(Server, Reliable)
+	void ServerReturnToLobby();
 
 	// --- Console scaffolding ---------------------------------------------------------------
 	// TODO(join-ui): delete this whole block, its implementations, and UDinoSessionSubsystem's
@@ -119,8 +141,26 @@ public:
 	UFUNCTION(Exec)
 	void DinoBuildVersion();
 
+	/** Host: starts the round from the lobby. Same as the Start Round button. */
+	UFUNCTION(Exec)
+	void DinoStartRound();
+
+	/** Host: reloads the map straight into a new round. */
+	UFUNCTION(Exec)
+	void DinoRestartRound();
+
+	/** Host: reloads the map into the lobby. */
+	UFUNCTION(Exec)
+	void DinoLobby();
+
 protected:
 	virtual void BeginPlay() override;
+
+	/**
+	 * Runs on whichever machine the state changed on - the server for everyone, and also the
+	 * owning client after ClientGotoState. Only the local half does anything here.
+	 */
+	virtual void BeginSpectatingState() override;
 	virtual void AcknowledgePossession(APawn* NewPawn) override;
 	virtual void ClientVoiceHandshakeComplete() override;
 
@@ -130,6 +170,33 @@ private:
 	/** Created on first use and kept, so a reopened menu is not rebuilt from scratch. */
 	UPROPERTY(Transient)
 	TObjectPtr<class UDinoJoinMenu> JoinMenu;
+
+	UPROPERTY(Transient)
+	TObjectPtr<class UDinoSessionMenu> SessionMenu;
+
+	UPROPERTY(Transient)
+	TObjectPtr<class UDinoSpectatorOverlay> SpectatorOverlay;
+
+	void ShowMainMenu();
+	void OpenSessionMenu();
+	void CloseSessionMenu();
+
+	/**
+	 * Keeps this player's screens in step with the match, a few times a second.
+	 *
+	 * Polled rather than driven by replication callbacks. On a client the game state can arrive
+	 * after this controller begins play, and a match-state change can land before or after a
+	 * travel finishes; a callback subscribed at the wrong moment simply never fires. Reading the
+	 * state on a timer cannot miss a phase.
+	 *
+	 * Opens the session menu on entering the lobby or round over, closes it when a round starts,
+	 * and shows the spectator overlay whenever spectating a round.
+	 */
+	void PollSessionUI();
+
+	FTimerHandle SessionUITimer;
+	FName LastSeenMatchState;
+	bool bOnMainMenu = false;
 
 	/**
 	 * Starts transmitting for the local player. Open mic: the engine gates transmission on input

@@ -1,4 +1,4 @@
-#include "Online/DinoSessionSubsystem.h"
+﻿#include "Online/DinoSessionSubsystem.h"
 
 #include "DinoBuildInfo.h"
 #include "DinoGame.h"
@@ -6,6 +6,9 @@
 #include "Engine/NetDriver.h"
 #include "Engine/World.h"
 #include "GameFramework/GameModeBase.h"
+#include "GameMapsSettings.h"
+#include "Kismet/GameplayStatics.h"
+#include "Misc/PackageName.h"
 #include "GameFramework/PlayerController.h"
 #include "Online/OnlineSessionNames.h"
 #include "OnlineSubsystem.h"
@@ -51,14 +54,9 @@ void UDinoSessionSubsystem::HostSession(const FString& MapName, int32 MaxPlayers
 		return;
 	}
 
-	// An empty map name means "whatever is already loaded". Resolving it here rather than in
-	// each caller means the menu and the console command cannot drift apart.
-	FString ResolvedMap = MapName;
-	if (ResolvedMap.IsEmpty())
-	{
-		const UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
-		ResolvedMap = World ? UWorld::RemovePIEPrefix(World->GetMapName()) : FString();
-	}
+	// An empty map name means the gameplay map. Resolving it here rather than in each caller
+	// means the menu and the console command cannot drift apart.
+	const FString ResolvedMap = MapName.IsEmpty() ? GameplayMap : MapName;
 
 	if (ResolvedMap.IsEmpty())
 	{
@@ -431,6 +429,42 @@ void UDinoSessionSubsystem::HandleDestroyComplete(FName SessionName, bool bWasSu
 		bWasSuccessful ? TEXT("ok") : TEXT("failed")));
 
 	OnLeaveComplete.Broadcast(bWasSuccessful);
+
+	// Out of a session there is nothing to do in the gameplay map: a host left there is a
+	// listen server nobody can find, and a client is still connected to a game it meant to leave.
+	OpenMainMenu();
+}
+
+void UDinoSessionSubsystem::ReturnToMainMenu()
+{
+	if (IsInSession())
+	{
+		// Opens the menu from HandleDestroyComplete, once the session is really gone - opening
+		// it first would tear down the world the destroy is still running in.
+		LeaveSession();
+		return;
+	}
+
+	OpenMainMenu();
+}
+
+void UDinoSessionSubsystem::OpenMainMenu()
+{
+	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
+	if (!World)
+	{
+		return;
+	}
+
+	// The default map is the main menu, so there is one setting to change rather than two.
+	const FString MenuMap = UGameMapsSettings::GetGameDefaultMap();
+	const FString CurrentMap = UWorld::RemovePIEPrefix(World->GetOutermost()->GetName());
+	if (MenuMap.IsEmpty() || FPackageName::ObjectPathToPackageName(MenuMap) == CurrentMap)
+	{
+		return;
+	}
+
+	UGameplayStatics::OpenLevel(World, FName(*FPackageName::ObjectPathToPackageName(MenuMap)));
 }
 
 // --- Join codes ------------------------------------------------------------------------------

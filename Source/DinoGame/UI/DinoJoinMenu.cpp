@@ -1,4 +1,4 @@
-#include "UI/DinoJoinMenu.h"
+﻿#include "UI/DinoJoinMenu.h"
 
 #include "Components/Button.h"
 #include "Components/EditableTextBox.h"
@@ -6,6 +6,7 @@
 #include "DinoBuildInfo.h"
 #include "DinoGame.h"
 #include "Engine/GameInstance.h"
+#include "Kismet/KismetSystemLibrary.h"
 #include "Online/DinoSessionSubsystem.h"
 
 void UDinoJoinMenu::NativeConstruct()
@@ -20,6 +21,11 @@ void UDinoJoinMenu::NativeConstruct()
 	if (JoinButton)
 	{
 		JoinButton->OnClicked.AddDynamic(this, &UDinoJoinMenu::HandleJoinClicked);
+	}
+
+	if (QuitButton)
+	{
+		QuitButton->OnClicked.AddDynamic(this, &UDinoJoinMenu::HandleQuitClicked);
 	}
 
 	if (CodeInput)
@@ -57,7 +63,7 @@ void UDinoJoinMenu::NativeConstruct()
 
 FReply UDinoJoinMenu::NativeOnKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent)
 {
-	if (InKeyEvent.GetKey() == EKeys::Escape)
+	if (InKeyEvent.GetKey() == EKeys::Escape && !bMainMenuMode)
 	{
 		HideMenu();
 		return FReply::Handled();
@@ -176,8 +182,13 @@ void UDinoJoinMenu::HandleHostClicked()
 	SetBusy(true);
 	SetStatus(TEXT("Creating session..."));
 
-	// Empty map name means the map already loaded; HostSession resolves it.
+	// Empty map name means the configured gameplay map; HostSession resolves it.
 	Subsystem->HostSession(FString(), 4, false);
+}
+
+void UDinoJoinMenu::HandleQuitClicked()
+{
+	UKismetSystemLibrary::QuitGame(this, GetOwningPlayer(), EQuitPreference::Quit, false);
 }
 
 void UDinoJoinMenu::HandleJoinClicked()
