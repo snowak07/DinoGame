@@ -7,6 +7,11 @@
 #include "DinoCharacter.generated.h"
 
 class ADinoCreature;
+class UDinoFlareGunComponent;
+class UEnhancedInputLocalPlayerSubsystem;
+class UInputAction;
+class UInputMappingContext;
+class UPrimitiveComponent;
 class USoundAttenuation;
 class UVOIPTalker;
 
@@ -55,6 +60,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Dino|Voice")
 	float GetVoiceLevel() const;
 
+	UFUNCTION(BlueprintPure, Category = "Dino|Weapons")
+	UDinoFlareGunComponent* GetFlareGun() const { return FlareGun; }
+
 	// --- Restraint ------------------------------------------------------------------------
 	// A player held by a creature: pinned under a raptor, or in a T-Rex's jaws. The creature's
 	// attack component decides when; this side owns what it does to the player.
@@ -79,6 +87,16 @@ public:
 	/** The creature holding this player, or null. What a future jaw camera would attach to. */
 	UFUNCTION(BlueprintPure, Category = "Dino|Restraint")
 	ADinoCreature* GetRestrainingCreature() const { return Restraint.Captor; }
+
+	/** Flat direction from this player to their captor when caught. The pinned body's feet point this way. */
+	FVector GetPinDirection() const { return Restraint.Direction; }
+
+	/**
+	 * Where a pinning creature stands: on the ground, over the lying body's chest. Decided here
+	 * because the body's layout is decided here; the raptor moves to it, and the victim's camera
+	 * aims at it, so the two cannot disagree.
+	 */
+	FVector GetPinnedCaptorSpot() const;
 
 protected:
 	/**
@@ -108,6 +126,67 @@ protected:
 	virtual void BeginPlay() override;
 	virtual void PossessedBy(AController* NewController) override;
 	virtual void OnRep_PlayerState() override;
+
+	/**
+	 * Binds the flare gun and crouch. Movement, look and jump stay in the Blueprint; these two
+	 * are built in code so they need no input assets.
+	 *
+	 * Crouch: hold Left Ctrl, or press C (right stick click on a pad) to toggle.
+	 */
+	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;
+
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
+	/**
+	 * Re-applies the pinned pose if a crouch change lands while pinned. ACharacter repositions
+	 * the body mesh on every crouch change, and on a watching client the uncrouch can replicate
+	 * after the pin - which would stand the body back up mid-pin.
+	 */
+	virtual void OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust) override;
+	virtual void OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust) override;
+
+	// --- Pinned pose ---------------------------------------------------------------------------
+	// A pinned player lies on their back, feet toward the raptor. Done by laying the body mesh
+	// down; the capsule stays upright, so movement and collision are untouched. No animation
+	// asset is involved - the body is the standing mesh, turned flat.
+
+	/** Feet to crown of the lying body, used to centre it on the capsule. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Restraint", meta = (ClampMin = "0.0"))
+	float PinnedBodyLength = 180.0f;
+
+	/** How far the lying body sits above the ground, so it rests on the floor rather than in it. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Restraint")
+	float PinnedBodyLift = 10.0f;
+
+	/** Drop the pinned player's own view to where their head now lies, and hide their arms. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Restraint")
+	bool bLowerViewWhenPinned = true;
+
+	/** Height of a pinned player's eyes above the ground. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Restraint", meta = (ClampMin = "0.0"))
+	float PinnedEyeHeight = 25.0f;
+
+	/**
+	 * How far from the middle of the lying body, toward the feet, the raptor stands. 0 is dead
+	 * centre; larger moves it down the body, out from directly over the victim's face.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Restraint")
+	float PinnedCaptorOffset = 40.0f;
+
+	/** Degrees a pinned player can look left or right of the raptor. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Restraint", meta = (ClampMin = "0.0", ClampMax = "179.0"))
+	float PinnedLookYawLeeway = 25.0f;
+
+	/** Degrees a pinned player can look up or down from the raptor. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Restraint", meta = (ClampMin = "0.0", ClampMax = "89.0"))
+	float PinnedLookPitchLeeway = 15.0f;
+
+	/**
+	 * Every player carries one. Created here in the C++ parent so BP_FirstPersonCharacter
+	 * inherits it with no editor work, the same as VoipTalker.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Dino|Weapons")
+	TObjectPtr<UDinoFlareGunComponent> FlareGun;
 
 	/**
 	 * This player's voice source. A UActorComponent, not a scene component — it carries no
@@ -171,6 +250,45 @@ private:
 
 	/** Applies or undoes restraint effects. Runs on every machine, like ApplyHealthChange. */
 	void ApplyRestraintChange(const FDinoRestraintState& OldRestraint);
+
+	/** Lays the body down feet-first toward the captor. Every machine; the view part only locally. */
+	void ApplyPinnedPose();
+
+	/** Stands the body back up and restores the view. Safe to call when not posed. */
+	void ClearPinnedPose();
+
+	/**
+	 * The first-person arms the camera is mounted on, found by its rendering role rather than by
+	 * name, so renaming the Blueprint component does not silently break the pinned view.
+	 */
+	UPrimitiveComponent* FindFirstPersonMesh() const;
+
+	bool bPinnedPoseApplied = false;
+	TWeakObjectPtr<UPrimitiveComponent> PosedFirstPersonMesh;
+	FTransform SavedFirstPersonMeshTransform;
+
+	// --- Crouch input --------------------------------------------------------------------------
+
+	void HandleCrouchPressed();
+	void HandleCrouchReleased();
+	void HandleCrouchToggled();
+
+	/** Alive and free. A pinned or dead player cannot crouch. */
+	bool CanUseCrouchInput() const;
+
+	/** Removes the crouch mapping. On death, so the keys are free, and on EndPlay. */
+	void RemoveCharacterInput();
+
+	UPROPERTY(Transient)
+	TObjectPtr<UInputAction> CrouchHoldAction;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UInputAction> CrouchToggleAction;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UInputMappingContext> CharacterInputContext;
+
+	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> CharacterInputSubsystem;
 
 	/**
 	 * The controller whose move input this restraint switched off, so the release switches the

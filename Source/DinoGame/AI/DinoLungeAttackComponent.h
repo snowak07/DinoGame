@@ -78,6 +78,13 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Attack", meta = (ClampMin = "0.0"))
 	float RecoveryDuration = 0.8f;
 
+	/**
+	 * Seconds to climb from where the bite landed onto the pinned victim. 0 snaps straight there.
+	 * Where it stands is the victim's call - PinnedCaptorOffset on the player.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Attack", meta = (ClampMin = "0.0"))
+	float PinSettleDuration = 0.2f;
+
 	virtual bool CanTriggerFromAwareness(EDinoAwareness Awareness) const override;
 	virtual ADinoCharacter* SelectVictim(bool bForced) const override;
 
@@ -91,14 +98,32 @@ protected:
 
 private:
 	void BeginLunge();
-	void StopLunge();
 	void TryBite();
 	void LandBite(ADinoCharacter* Victim);
 	void ApplyPinDamage();
 	FVector GetBiteCentre() const;
 
-	/** The dash's root motion source, so a stagger can remove it mid-flight. 0 = none. */
-	uint16 LungeRootMotionId = 0;
+	/** Stands over the pinned victim, facing their head. */
+	void SettleOverVictim(ADinoCharacter* Victim);
+
+	/** Lets the capsules overlap again. Safe to call when not settled. */
+	void StopIgnoringVictim();
+
+	/** A timed, swept move to Target - see BeginLunge for why root motion. Replaces any current one. */
+	void ApplyTimedMove(const FVector& Target, float Duration, FName InstanceName);
+	void StopTimedMove();
+
+	/**
+	 * The current timed move's root motion source - the dash, or the climb onto the victim - so a
+	 * stagger can remove it mid-flight. 0 = none.
+	 */
+	uint16 TimedMoveRootMotionId = 0;
+
+	/**
+	 * The victim this raptor's capsule is passing through. Ignored by this raptor's movement only:
+	 * every other player still collides with it, and flares, which are not pawns, still hit it.
+	 */
+	TWeakObjectPtr<AActor> IgnoredVictim;
 
 	FVector LungeDirection = FVector::ForwardVector;
 	FTimerHandle PinTimer;

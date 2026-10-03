@@ -7,6 +7,7 @@
 #include "DinoGameState.h"
 #include "DinoSpectatorPawn.h"
 #include "GameFramework/GameMode.h"
+#include "Camera/PlayerCameraManager.h"
 #include "TimerManager.h"
 #include "UI/DinoSessionMenu.h"
 #include "UI/DinoSpectatorOverlay.h"
@@ -188,7 +189,15 @@ void ADinoPlayerController::CloseSessionMenu()
 	if (SessionMenu && SessionMenu->IsOpen())
 	{
 		SessionMenu->Close();
+		return;
 	}
+
+	// Restored even with no menu on screen. A seamless restart keeps this controller - and the
+	// UI-only input mode and cursor the round-over menu set - while removing the menu itself.
+	// Only fixing input when the menu was still showing left players unable to move, with a
+	// cursor and no menu, and spectators unable to switch camera.
+	SetInputMode(FInputModeGameOnly());
+	SetShowMouseCursor(false);
 }
 
 void ADinoPlayerController::PollSessionUI()
@@ -198,6 +207,12 @@ void ADinoPlayerController::PollSessionUI()
 	if (bOnMainMenu || !DinoState)
 	{
 		return;
+	}
+
+	if (DinoState != LastSeenGameState.Get())
+	{
+		LastSeenGameState = DinoState;
+		LastSeenMatchState = NAME_None;
 	}
 
 	const FName CurrentState = DinoState->GetMatchState();
@@ -248,6 +263,60 @@ void ADinoPlayerController::BeginSpectatingState()
 		// mid-pin is exactly the case where the pairing is most fragile, and a counter left at
 		// one would freeze the spectator camera's fly controls for the rest of the session.
 		ResetIgnoreInputFlags();
+
+		// Dying pinned leaves the view held on the raptor; the spectator camera must not inherit it.
+		ReleaseViewConstraint();
+	}
+}
+
+// --- View constraint -------------------------------------------------------------------------
+
+void ADinoPlayerController::ConstrainView(const FRotator& Centre, float YawLeeway, float PitchLeeway)
+{
+	if (!IsLocalController() || !PlayerCameraManager)
+	{
+		return;
+	}
+
+	if (!bViewConstrained)
+	{
+		SavedViewPitchMin = PlayerCameraManager->ViewPitchMin;
+		SavedViewPitchMax = PlayerCameraManager->ViewPitchMax;
+		SavedViewYawMin = PlayerCameraManager->ViewYawMin;
+		SavedViewYawMax = PlayerCameraManager->ViewYawMax;
+		bViewConstrained = true;
+
+		SetControlRotation(FRotator(Centre.Pitch, Centre.Yaw, 0.0f));
+	}
+
+	// The engine clamps with FMath::ClampAngle, which measures the range from its midpoint and
+	// so copes with a window that crosses 0/360 degrees. A full 180 either side would make the
+	// range zero wide - hence the cap. Pitch stays short of straight up or down, where yaw is
+	// meaningless.
+	const float Pitch = FRotator::NormalizeAxis(Centre.Pitch);
+	const float PitchRoom = FMath::Clamp(PitchLeeway, 0.0f, 89.0f);
+	const float YawRoom = FMath::Clamp(YawLeeway, 0.0f, 179.0f);
+
+	PlayerCameraManager->ViewPitchMin = FMath::Clamp(Pitch - PitchRoom, -89.0f, 89.0f);
+	PlayerCameraManager->ViewPitchMax = FMath::Clamp(Pitch + PitchRoom, -89.0f, 89.0f);
+	PlayerCameraManager->ViewYawMin = FRotator::ClampAxis(Centre.Yaw - YawRoom);
+	PlayerCameraManager->ViewYawMax = FRotator::ClampAxis(Centre.Yaw + YawRoom);
+}
+
+void ADinoPlayerController::ReleaseViewConstraint()
+{
+	if (!bViewConstrained)
+	{
+		return;
+	}
+	bViewConstrained = false;
+
+	if (PlayerCameraManager)
+	{
+		PlayerCameraManager->ViewPitchMin = SavedViewPitchMin;
+		PlayerCameraManager->ViewPitchMax = SavedViewPitchMax;
+		PlayerCameraManager->ViewYawMin = SavedViewYawMin;
+		PlayerCameraManager->ViewYawMax = SavedViewYawMax;
 	}
 }
 
@@ -333,6 +402,10 @@ void ADinoPlayerController::DinoLobby()
 void ADinoPlayerController::AcknowledgePossession(APawn* NewPawn)
 {
 	Super::AcknowledgePossession(NewPawn);
+
+	// A restart mid-pin destroys the body without its pin ever ending; a fresh character starts
+	// with a free view.
+	ReleaseViewConstraint();
 
 	OnLocalPawnReady(NewPawn);
 }

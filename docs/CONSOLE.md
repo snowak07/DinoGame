@@ -32,8 +32,10 @@ counts as the host. With several PIE players, use the server's window.
 `DinoSetState` takes partial names: `unaware`, `sus`, `alert`, `hunt`, `search`, `att`.
 Use `att` rather than `a` — `a` matches **Alerted** first.
 
-`DinoHitDino` stands in for player attacks until those exist. It picks the *nearest* living
-creature, including one with its AI switched off, so stand closer to the one you mean.
+`DinoHitDino` hits without aiming, the quick way to probe a creature's stagger threshold or
+health; the flare gun (LMB) is the real weapon and goes through the same damage path. It picks
+the *nearest* living creature, including one with its AI switched off, so stand closer to the one
+you mean.
 
 ### Console variables
 
@@ -96,6 +98,14 @@ The same three are buttons on the **Tab menu**, shown to the host only.
 
 Playing in the editor starts in the lobby, so `DinoStartRound` (or the button) is the first
 thing to do in any solo test.
+
+### Player controls
+
+| Input | |
+|---|---|
+| **LMB** (right trigger) | Fire a flare, at most once every 1.5 s. Knocks a raptor off a pinned player |
+| **Left Ctrl** (hold) / **C** (toggle, right stick click) | Crouch |
+| **Tab** | The session menu |
 
 ### Spectator controls
 

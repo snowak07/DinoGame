@@ -129,10 +129,9 @@ public:
 	/**
 	 * Hits the nearest living creature for Damage, e.g. "DinoHitDino 25".
 	 *
-	 * TODO(combat): stand-in for player attacks, which do not exist yet. Goes through
-	 * UGameplayStatics::ApplyDamage - exactly the path a weapon will use - so everything behind
-	 * it (stagger, pin release, creature death) is exercised for real, and a weapon replaces
-	 * only this command.
+	 * A test tool, kept now that the flare gun exists: it hits without aiming, which makes it the
+	 * quick way to probe a creature's stagger threshold or health. Goes through
+	 * UGameplayStatics::ApplyDamage, the same path a flare takes, so it behaves exactly like one.
 	 */
 	UFUNCTION(Exec)
 	void DinoHitDino(float Damage = 25.0f);
@@ -152,6 +151,20 @@ public:
 	/** Host: reloads the map into the lobby. */
 	UFUNCTION(Exec)
 	void DinoLobby();
+
+	/**
+	 * Local only. Turns the view to Centre and keeps it within the leeway either side - the
+	 * pinned player's view, held on the raptor.
+	 *
+	 * Done with the camera manager's view limits, which the engine applies to every look input
+	 * before it reaches the control rotation, so the clamp is exact and costs nothing per frame.
+	 * The view is only snapped to Centre the first time; calling again while constrained just
+	 * moves the window, so re-applying a pose does not yank the camera.
+	 */
+	void ConstrainView(const FRotator& Centre, float YawLeeway, float PitchLeeway);
+
+	/** Puts back the view limits ConstrainView replaced. Safe to call when not constrained. */
+	void ReleaseViewConstraint();
 
 protected:
 	virtual void BeginPlay() override;
@@ -197,6 +210,28 @@ private:
 	FTimerHandle SessionUITimer;
 	FName LastSeenMatchState;
 	bool bOnMainMenu = false;
+
+	/**
+	 * The game state the last poll read. A different one means a new map, so the poll starts
+	 * afresh rather than comparing against the old map's match state. A restart mid-round goes
+	 * straight from one round to the next - InProgress to InProgress - and would otherwise never
+	 * register as a change at all.
+	 */
+	TWeakObjectPtr<const class AGameStateBase> LastSeenGameState;
+
+	/**
+	 * The camera manager's own limits, from before ConstrainView. Saved rather than reset to the
+	 * engine's defaults, because BP_FirstPersonCameraManager sets its own pitch range.
+	 *
+	 * Released by the pin ending, and also on spectating and on possessing a new character: a
+	 * player who dies pinned keeps the constrained view through the death beat - it stays on what
+	 * killed them - and the camera manager belongs to this controller, which outlives the body.
+	 */
+	bool bViewConstrained = false;
+	float SavedViewPitchMin = 0.0f;
+	float SavedViewPitchMax = 0.0f;
+	float SavedViewYawMin = 0.0f;
+	float SavedViewYawMax = 0.0f;
 
 	/**
 	 * Starts transmitting for the local player. Open mic: the engine gates transmission on input

@@ -133,6 +133,16 @@ resetting actors by hand.
   even as `=0`, or the last restart's value carries over.
 - **After a seamless restart `PostLogin` is skipped**; per-player setup belongs in
   `HandleStartingNewPlayer`, which both paths reach.
+- **Seamless travel carries the world clock over** (`LoadedWorld->TimeSeconds` is copied from the
+  old world). Never time "since this map started" by comparing `GetTimeSeconds()` to a constant:
+  minutes into a session it is already past. Record a start time and compare to that.
+- **A seamless restart keeps each PlayerController, including its input mode**, while removing
+  its widgets. Anything that set UI-only input must be undone explicitly on round start, not
+  only when its widget is found still on screen.
+- **`ReadyToStartMatch` must not say yes before the world has begun play.** AGameMode asks it
+  from `StartPlay`, and a yes there skips `NotifyBeginPlay` and starts the round first —
+  characters are possessed before their world begins play, and the player cannot move or look.
+  Solo restarts hit this every time, because everyone is already present when the map starts.
 
 The new screens (`UDinoSessionMenu`, `UDinoSpectatorOverlay`) are laid out in C++ with
 `WidgetTree->ConstructWidget` — no Blueprint to keep in step. Spectator controls are input

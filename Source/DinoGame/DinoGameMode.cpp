@@ -1,5 +1,6 @@
 ﻿#include "DinoGameMode.h"
 
+#include "DinoCharacter.h"
 #include "DinoGame.h"
 #include "DinoGameState.h"
 #include "DinoPlayerController.h"
@@ -139,11 +140,23 @@ void ADinoGameMode::BeginSpectating(APlayerController* Player)
 		return;
 	}
 
+	APawn* Body = Player->GetPawn();
+
 	// The engine's spectating state unpossesses the body on the server and spawns SpectatorClass
 	// on the owning client only. Both halves are needed: ChangeState alone leaves the client
 	// believing it is still playing, with no camera.
 	Player->ChangeState(NAME_Spectating);
 	Player->ClientGotoState(NAME_Spectating);
+
+	// A dead player's body has been hidden since the moment of death, kept only because its
+	// owner was still looking through it. Nobody is now, so it goes.
+	if (const ADinoCharacter* DeadBody = Cast<ADinoCharacter>(Body))
+	{
+		if (!DeadBody->IsAlive())
+		{
+			Body->Destroy();
+		}
+	}
 }
 
 void ADinoGameMode::NotifyPlayerDied(AController* Victim)
@@ -179,11 +192,39 @@ bool ADinoGameMode::ReadyToStartMatch_Implementation()
 		return false;
 	}
 
+	// Never before the world has begun play. When everyone is already present as the map starts
+	// - always, in solo - AGameMode asks this from StartPlay, and a "yes" there makes it skip
+	// NotifyBeginPlay in HandleMatchIsWaitingToStart and start the round first: characters are
+	// spawned and possessed before the world they are in has begun play, and the player could
+	// neither move nor look. Waiting one tick puts a restart through the same order as the
+	// lobby's Start button - world begins play, then the round starts - which is the path known
+	// to work. AGameMode::Tick asks again every frame, so the delay is a single tick.
+	if (!GetWorld() || !GetWorld()->HasBegunPlay())
+	{
+		return false;
+	}
+
 	// Seamless travel tracks players still loading in NumTravellingPlayers. A full reconnect -
 	// which is what PIE always does - has no such count, so also wait for the head count the
 	// restart recorded, with a timeout so one player who never comes back cannot block it.
+	//
+	// NumTravellingPlayers matters twice over: AGameMode::GetNumPlayers() counts players still
+	// loading as well as those who have arrived, so the head count alone would be met before
+	// anyone but the host had loaded - and a player who has not loaded cannot be spawned.
 	const bool bEveryoneHere = NumTravellingPlayers == 0 && GetNumPlayers() >= AutoStartPlayerCount;
-	const bool bTimedOut = GetWorld() && GetWorld()->GetTimeSeconds() >= AutoStartTimeout;
+
+	const double Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
+	if (AutoStartDeadline < 0.0)
+	{
+		AutoStartDeadline = Now + AutoStartTimeout;
+	}
+	const bool bTimedOut = Now >= AutoStartDeadline;
+
+	if (bTimedOut && !bEveryoneHere)
+	{
+		UE_LOG(LogDinoNet, Warning, TEXT("Auto-start timed out after %.0fs with %d travelling - starting without them."),
+			AutoStartTimeout, NumTravellingPlayers);
+	}
 
 	return bEveryoneHere || bTimedOut;
 }

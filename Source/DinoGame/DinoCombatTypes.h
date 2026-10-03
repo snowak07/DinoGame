@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Engine/NetSerialization.h"
 #include "DinoCombatTypes.generated.h"
 
 class ADinoCreature;
@@ -90,4 +91,15 @@ struct FDinoRestraintState
 
 	UPROPERTY(BlueprintReadOnly, Category = "Dino|Restraint")
 	TObjectPtr<ADinoCreature> Captor = nullptr;
+
+	/**
+	 * Flat direction from the victim to the captor at the moment of capture. Fixed for the whole
+	 * hold, and decided once on the server.
+	 *
+	 * Not recomputed from where the captor stands now: a pinning raptor climbs onto the body, so
+	 * a minute later "toward the captor" points nowhere useful - and on a client, the pin and the
+	 * raptor's move onto the body arrive in either order. Everyone lays the body out from this.
+	 */
+	UPROPERTY()
+	FVector_NetQuantizeNormal Direction = FVector::ForwardVector;
 };

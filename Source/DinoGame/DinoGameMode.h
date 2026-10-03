@@ -94,5 +94,14 @@ private:
 	/** From the travel URL: start the round on arrival, waiting for this many players. */
 	int32 AutoStartPlayerCount = 0;
 
+	/**
+	 * When an auto-start stops waiting for stragglers. Set the first time the wait is checked,
+	 * not compared against raw world time: seamless travel copies the old world's clock into the
+	 * new one (UWorld's seamless travel handler sets LoadedWorld->TimeSeconds from the current
+	 * world), so minutes into a session "seconds since this map started" is already past any
+	 * timeout the moment the map loads - which started rounds before clients had finished loading.
+	 */
+	double AutoStartDeadline = -1.0;
+
 	double LastDeathTime = -1.0;
 };

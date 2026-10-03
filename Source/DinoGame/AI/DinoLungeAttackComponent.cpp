@@ -2,6 +2,7 @@
 
 #include "AI/DinoAIControllerBase.h"
 #include "AI/DinoCreature.h"
+#include "Components/CapsuleComponent.h"
 #include "DinoCharacter.h"
 #include "DinoGame.h"
 #include "DrawDebugHelpers.h"
@@ -98,7 +99,7 @@ void UDinoLungeAttackComponent::OnPhaseTimerElapsed()
 
 	case EDinoAttackPhase::Lunge:
 		// The dash ran its full length without catching anyone.
-		StopLunge();
+		StopTimedMove();
 		SetPhase(EDinoAttackPhase::Recovery, RecoveryDuration);
 		break;
 
@@ -115,8 +116,7 @@ void UDinoLungeAttackComponent::OnPhaseTimerElapsed()
 void UDinoLungeAttackComponent::BeginLunge()
 {
 	ADinoCreature* Creature = GetCreature();
-	UCharacterMovementComponent* Movement = Creature ? Creature->GetCharacterMovement() : nullptr;
-	if (!Movement)
+	if (!Creature || !Creature->GetCharacterMovement())
 	{
 		FinishAttack(EDinoAttackOutcome::Cancelled);
 		return;
@@ -124,34 +124,46 @@ void UDinoLungeAttackComponent::BeginLunge()
 
 	// Locked now, at the end of the windup - this is what makes a sidestep work.
 	LungeDirection = Creature->GetActorForwardVector().GetSafeNormal2D();
-	const FVector Start = Creature->GetActorLocation();
+	ApplyTimedMove(Creature->GetActorLocation() + LungeDirection * LungeDistance, LungeDuration, TEXT("DinoLunge"));
+
+	SetPhase(EDinoAttackPhase::Lunge, LungeDuration, true);
+}
+
+void UDinoLungeAttackComponent::ApplyTimedMove(const FVector& Target, float Duration, FName InstanceName)
+{
+	const ADinoCreature* Creature = GetCreature();
+	UCharacterMovementComponent* Movement = Creature ? Creature->GetCharacterMovement() : nullptr;
+	if (!Movement)
+	{
+		return;
+	}
+
+	StopTimedMove();
 
 	// Root motion rather than launching or setting velocity: an exact distance over an exact
 	// time, swept through collision by the movement component so it cannot tunnel through a
 	// wall, and replicated as ordinary movement. Same setup as Epic's
 	// AbilityTask_ApplyRootMotionMoveToForce.
-	TSharedPtr<FRootMotionSource_MoveToForce> Dash = MakeShared<FRootMotionSource_MoveToForce>();
-	Dash->InstanceName = TEXT("DinoLunge");
-	Dash->AccumulateMode = ERootMotionAccumulateMode::Override;
-	Dash->Priority = 500;
-	Dash->Duration = LungeDuration;
-	Dash->StartLocation = Start;
-	Dash->TargetLocation = Start + LungeDirection * LungeDistance;
-	Dash->bRestrictSpeedToExpected = false;
+	TSharedPtr<FRootMotionSource_MoveToForce> Move = MakeShared<FRootMotionSource_MoveToForce>();
+	Move->InstanceName = InstanceName;
+	Move->AccumulateMode = ERootMotionAccumulateMode::Override;
+	Move->Priority = 500;
+	Move->Duration = Duration;
+	Move->StartLocation = Creature->GetActorLocation();
+	Move->TargetLocation = Target;
+	Move->bRestrictSpeedToExpected = false;
 
-	// The default, MaintainLastRootMotionVelocity, keeps full dash speed once the source ends,
-	// and the creature slides on past the end of its lunge. Stop dead instead.
-	Dash->FinishVelocityParams.Mode = ERootMotionFinishVelocityMode::SetVelocity;
-	Dash->FinishVelocityParams.SetVelocity = FVector::ZeroVector;
+	// The default, MaintainLastRootMotionVelocity, keeps full speed once the source ends, and the
+	// creature slides on past the end of its move. Stop dead instead.
+	Move->FinishVelocityParams.Mode = ERootMotionFinishVelocityMode::SetVelocity;
+	Move->FinishVelocityParams.SetVelocity = FVector::ZeroVector;
 
-	LungeRootMotionId = Movement->ApplyRootMotionSource(Dash);
-
-	SetPhase(EDinoAttackPhase::Lunge, LungeDuration, true);
+	TimedMoveRootMotionId = Movement->ApplyRootMotionSource(Move);
 }
 
-void UDinoLungeAttackComponent::StopLunge()
+void UDinoLungeAttackComponent::StopTimedMove()
 {
-	if (LungeRootMotionId == static_cast<uint16>(ERootMotionSourceID::Invalid))
+	if (TimedMoveRootMotionId == static_cast<uint16>(ERootMotionSourceID::Invalid))
 	{
 		return;
 	}
@@ -160,12 +172,12 @@ void UDinoLungeAttackComponent::StopLunge()
 	{
 		if (UCharacterMovementComponent* Movement = Creature->GetCharacterMovement())
 		{
-			Movement->RemoveRootMotionSourceByID(LungeRootMotionId);
+			Movement->RemoveRootMotionSourceByID(TimedMoveRootMotionId);
 			Movement->StopMovementImmediately();
 		}
 	}
 
-	LungeRootMotionId = static_cast<uint16>(ERootMotionSourceID::Invalid);
+	TimedMoveRootMotionId = static_cast<uint16>(ERootMotionSourceID::Invalid);
 }
 
 FVector UDinoLungeAttackComponent::GetBiteCentre() const
@@ -222,7 +234,7 @@ void UDinoLungeAttackComponent::TryBite()
 
 void UDinoLungeAttackComponent::LandBite(ADinoCharacter* Victim)
 {
-	StopLunge();
+	StopTimedMove();
 	DealDamage(Victim, LungeHitDamage, LungeDirection);
 
 	if (!Victim->IsAlive())
@@ -232,6 +244,7 @@ void UDinoLungeAttackComponent::LandBite(ADinoCharacter* Victim)
 	}
 
 	HoldVictim(Victim, EDinoRestraint::Pinned);
+	SettleOverVictim(Victim);
 
 	// No phase duration: the pin lasts until the victim dies or the raptor is staggered off.
 	SetPhase(EDinoAttackPhase::Holding);
@@ -241,6 +254,58 @@ void UDinoLungeAttackComponent::LandBite(ADinoCharacter* Victim)
 		World->GetTimerManager().SetTimer(PinTimer, this, &UDinoLungeAttackComponent::ApplyPinDamage,
 			PinDamageInterval, true);
 	}
+}
+
+void UDinoLungeAttackComponent::SettleOverVictim(ADinoCharacter* Victim)
+{
+	ADinoCreature* Creature = GetCreature();
+	UCapsuleComponent* Capsule = Creature ? Creature->GetCapsuleComponent() : nullptr;
+	if (!Capsule || !Victim)
+	{
+		return;
+	}
+
+	// The two capsules have to overlap for the raptor to stand on the body. Only this raptor's
+	// own movement ignores the victim, and only for the pin; the victim stays solid to everyone
+	// else. If the victim is freed, the movement component pushes them apart again.
+	Capsule->IgnoreActorWhenMoving(Victim, true);
+	IgnoredVictim = Victim;
+
+	// Facing the head - down the length of the body, the way it landed on them. The victim's feet
+	// point back along the pin direction, toward where the raptor came from.
+	const FVector TowardHead = -FVector(Victim->GetPinDirection()).GetSafeNormal2D();
+	if (!TowardHead.IsNearlyZero())
+	{
+		Creature->SetActorRotation(FRotator(0.0f, TowardHead.Rotation().Yaw, 0.0f));
+	}
+
+	// The victim's spot is on the ground; the raptor keeps its own height, so it stands on the
+	// floor at that point rather than being pushed into it.
+	FVector Target = Victim->GetPinnedCaptorSpot();
+	Target.Z = Creature->GetActorLocation().Z;
+
+	if (PinSettleDuration > 0.0f)
+	{
+		ApplyTimedMove(Target, PinSettleDuration, TEXT("DinoPinSettle"));
+	}
+	else
+	{
+		// Swept, so a wall between the bite and the body stops it rather than being passed through.
+		Creature->SetActorLocation(Target, true);
+	}
+}
+
+void UDinoLungeAttackComponent::StopIgnoringVictim()
+{
+	if (const ADinoCreature* Creature = GetCreature())
+	{
+		if (UCapsuleComponent* Capsule = Creature->GetCapsuleComponent())
+		{
+			// Also clears entries for a victim that has since been destroyed.
+			Capsule->IgnoreActorWhenMoving(IgnoredVictim.Get(), false);
+		}
+	}
+	IgnoredVictim.Reset();
 }
 
 void UDinoLungeAttackComponent::ApplyPinDamage()
@@ -264,7 +329,8 @@ void UDinoLungeAttackComponent::ApplyPinDamage()
 
 void UDinoLungeAttackComponent::CleanUpAttack()
 {
-	StopLunge();
+	StopTimedMove();
+	StopIgnoringVictim();
 
 	if (UWorld* World = GetWorld())
 	{
