@@ -5,6 +5,8 @@
 #include "DinoCharacter.h"
 #include "DinoGame.h"
 #include "Perception/AISense_Sight.h"
+#include "DrawDebugHelpers.h"
+#include "EngineUtils.h"
 #include "GameFramework/PlayerState.h"
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AISenseConfig_Hearing.h"
@@ -95,17 +97,7 @@ void ADinoAIControllerBase::BeginPlay()
 
 	// Applied here rather than in the constructor so EditDefaultsOnly overrides set on a
 	// Blueprint child are picked up; constructor values would be the C++ defaults only.
-	if (SightConfig)
-	{
-		SightConfig->SightRadius = SightRadius;
-		SightConfig->LoseSightRadius = FMath::Max(LoseSightRadius, SightRadius);
-		SightConfig->PeripheralVisionAngleDegrees = PeripheralVisionAngle;
-		SightConfig->PointOfViewBackwardOffset = PointOfViewBackwardOffset;
-		SightConfig->NearClippingRadius = NearClippingRadius;
-		SightConfig->AutoSuccessRangeFromLastSeenLocation = AutoSuccessRangeFromLastSeen;
-		SightConfig->SetMaxAge(MemoryDuration);
-		Perception->ConfigureSense(*SightConfig);
-	}
+	ApplySightConfig();
 
 	if (HearingConfig)
 	{
@@ -161,6 +153,13 @@ void ADinoAIControllerBase::OnPossess(APawn* InPawn)
 	}
 
 	GetWorldTimerManager().SetTimer(CombatTimer, this, &ADinoAIControllerBase::TickCombat, 0.1f, true);
+
+	// A creature placed in the level as a vision test target stands where it was put from the
+	// first frame, rather than starting to wander and having to be stopped.
+	if (const ADinoCreature* Creature = Cast<ADinoCreature>(InPawn); Creature && Creature->bVisionTestOnStart)
+	{
+		SetVisionTest(true);
+	}
 }
 
 void ADinoAIControllerBase::OnUnPossess()
@@ -213,7 +212,19 @@ bool ADinoAIControllerBase::IsValidTarget(const AActor* Actor) const
 
 void ADinoAIControllerBase::HandlePerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 {
-	if (!HasAuthority() || IsCreatureDead() || !IsValidTarget(Actor))
+	if (!HasAuthority() || IsCreatureDead())
+	{
+		return;
+	}
+
+	// Any change at all, for anyone: rebuild from scratch rather than reacting to this one event.
+	if (bVisionTest)
+	{
+		RefreshVisionTest();
+		return;
+	}
+
+	if (!IsValidTarget(Actor))
 	{
 		return;
 	}
@@ -329,7 +340,7 @@ void ADinoAIControllerBase::BeginSearching()
 {
 	// Contact may have returned and gone again between the timer being set and it firing;
 	// the acquire path clears this timer, but a target destroyed mid-window would not.
-	if (!CurrentTarget)
+	if (!CurrentTarget || bVisionTest)
 	{
 		return;
 	}
@@ -442,7 +453,10 @@ void ADinoAIControllerBase::ApplyAwareness(EDinoAwareness NewAwareness)
 
 	// The StateTree drives off this event rather than reading the enum every tick. Sent
 	// after the pawn is updated, so anything the tree reads on entry sees the new value.
-	if (StateTreeAI)
+	//
+	// Only to a running tree: a stopped one - a dead creature, a vision test - logs a warning
+	// for every event it is sent.
+	if (StateTreeAI && StateTreeAI->IsRunning())
 	{
 		const FGameplayTag Tag = DinoAwarenessTags::FromAwareness(NewAwareness);
 		if (Tag.IsValid())
@@ -468,7 +482,7 @@ FString ADinoAIControllerBase::DescribeState() const
 	return FString::Printf(TEXT("%s: %s%s | target=%s | contact=%s | lastKnown=%s | goal=%s%s%s"),
 		*Species.ToString(),
 		*DinoAwarenessName(GetAwareness()),
-		bAwarenessLocked ? TEXT(" [LOCKED]") : TEXT(""),
+		bVisionTest ? TEXT(" [VISION TEST]") : (bAwarenessLocked ? TEXT(" [LOCKED]") : TEXT("")),
 		CurrentTarget ? *CurrentTarget->GetName() : TEXT("none"),
 		bHasLiveContact ? TEXT("live") : TEXT("memory"),
 		CurrentTarget ? *LastKnownLocation.ToCompactString() : TEXT("-"),
@@ -494,6 +508,14 @@ void ADinoAIControllerBase::TickCombat()
 {
 	if (IsCreatureDead())
 	{
+		return;
+	}
+
+	// Perception only reports changes, and a player dying in plain sight is not one. Re-checked
+	// here so the readout never shows a creature still "seeing" someone who is no longer there.
+	if (bVisionTest)
+	{
+		RefreshVisionTest();
 		return;
 	}
 
@@ -542,8 +564,9 @@ void ADinoAIControllerBase::HandleAttackFinished(EDinoAttackOutcome Outcome)
 		*UEnum::GetDisplayValueAsText(Outcome).ToString(), *GetNameSafe(CurrentTarget),
 		bHasLiveContact ? TEXT("live") : TEXT("lost"));
 
-	// A locked state stays where the debug command put it; the task will attack again.
-	if (IsCreatureDead() || bAwarenessLocked)
+	// A locked state stays where the debug command put it; the task will attack again. A vision
+	// test cancels any attack on entry, and owns awareness from then on.
+	if (IsCreatureDead() || bAwarenessLocked || bVisionTest)
 	{
 		return;
 	}
@@ -633,6 +656,229 @@ bool ADinoAIControllerBase::TryAcquireVisibleTarget()
 
 	AcquireTarget(Nearest, Nearest->GetActorLocation(), true);
 	return true;
+}
+
+// --- Vision test -----------------------------------------------------------------------------
+
+void ADinoAIControllerBase::ApplySightConfig()
+{
+	if (!SightConfig || !Perception)
+	{
+		return;
+	}
+
+	SightConfig->SightRadius = SightRadius;
+
+	// The engine checks a target it can already see against LoseSightRadius rather than
+	// SightRadius - a band where something stays seen once noticed, but would not be noticed
+	// fresh. That is memory too, so a vision test closes the band.
+	SightConfig->LoseSightRadius = bVisionTest ? SightRadius : FMath::Max(LoseSightRadius, SightRadius);
+
+	SightConfig->PeripheralVisionAngleDegrees = PeripheralVisionAngle;
+	SightConfig->PointOfViewBackwardOffset = PointOfViewBackwardOffset;
+	SightConfig->NearClippingRadius = NearClippingRadius;
+	SightConfig->AutoSuccessRangeFromLastSeenLocation = AutoSuccessRangeFromLastSeen;
+	SightConfig->SetMaxAge(MemoryDuration);
+	Perception->ConfigureSense(*SightConfig);
+}
+
+void ADinoAIControllerBase::SetVisionTest(bool bEnable)
+{
+	if (!HasAuthority() || bEnable == bVisionTest || IsCreatureDead())
+	{
+		return;
+	}
+
+	// Set first, so the attack cancelled below finishes into a controller that already ignores
+	// the finish, rather than one that starts a search on its way out.
+	bVisionTest = bEnable;
+	bAwarenessLocked = false;
+
+	// Whatever it was doing, from either direction, is dropped: entering, so nothing it knew
+	// leaks into the test; leaving, so normal AI starts from what it can see now.
+	if (AttackComponent)
+	{
+		AttackComponent->CancelAttack();
+	}
+	GetWorldTimerManager().ClearTimer(MemoryTimer);
+	GetWorldTimerManager().ClearTimer(LostSightTimer);
+	GetWorldTimerManager().ClearTimer(SearchLegTimer);
+	ClearFocus(EAIFocusPriority::Gameplay);
+	StopChase();
+	StopMovement();
+	CurrentTarget = nullptr;
+	bHasLiveContact = false;
+
+	ApplySightConfig();
+
+	if (bEnable)
+	{
+		// Paused, not just ignored: a stopped tree runs no tasks, so nothing moves the creature.
+		// With no focus and no movement, its eyes face exactly the way its body was placed.
+		if (StateTreeAI)
+		{
+			StateTreeAI->StopLogic(TEXT("Vision test"));
+		}
+		RefreshVisionTest();
+	}
+	else
+	{
+		ApplyAwareness(EDinoAwareness::Unaware);
+		if (StateTreeAI)
+		{
+			StateTreeAI->StartLogic();
+		}
+
+		// Perception only reports changes, so a player standing in plain view would otherwise go
+		// unnoticed until they stepped out of sight and back in.
+		TryAcquireVisibleTarget();
+	}
+}
+
+void ADinoAIControllerBase::RefreshVisionTest()
+{
+	const APawn* Self = GetPawn();
+	TArray<AActor*> InSight;
+	if (Perception && Self)
+	{
+		Perception->GetCurrentlyPerceivedActors(UAISense_Sight::StaticClass(), InSight);
+	}
+
+	AActor* Nearest = nullptr;
+	float NearestDistance = TNumericLimits<float>::Max();
+	for (AActor* Candidate : InSight)
+	{
+		if (!IsValidTarget(Candidate))
+		{
+			continue;
+		}
+
+		const float Distance = FVector::DistSquared(Self->GetActorLocation(), Candidate->GetActorLocation());
+		if (Distance < NearestDistance)
+		{
+			NearestDistance = Distance;
+			Nearest = Candidate;
+		}
+	}
+
+	CurrentTarget = Nearest;
+	bHasLiveContact = Nearest != nullptr;
+	if (Nearest)
+	{
+		LastKnownLocation = Nearest->GetActorLocation();
+	}
+
+	// Straight to the state, past the attack and lock guards - nothing else gets a say in a test.
+	ApplyAwareness(Nearest ? EDinoAwareness::Hunting : EDinoAwareness::Unaware);
+}
+
+FString ADinoAIControllerBase::ExplainSight(const AActor* Target) const
+{
+	const APawn* Self = GetPawn();
+	const UWorld* World = GetWorld();
+	if (!Self || !Target || !World)
+	{
+		return TEXT("?");
+	}
+
+	// The same geometry UAISense_Sight uses: eyes and view direction from the controller's
+	// eyes viewpoint, the cone's apex pulled back behind the eyes, and the target's actor
+	// location - its capsule centre - as the single point that has to be seen.
+	FVector Eyes;
+	FRotator ViewRotation;
+	GetActorEyesViewPoint(Eyes, ViewRotation);
+	const FVector Forward = ViewRotation.Vector();
+	const FVector TargetLocation = Target->GetActorLocation();
+
+	const FVector Apex = Eyes - Forward * PointOfViewBackwardOffset;
+	const FVector FromApex = TargetLocation - Apex;
+	const float Range = SightRadius + PointOfViewBackwardOffset;
+
+	if (FromApex.SizeSquared() > FMath::Square(Range))
+	{
+		return FString::Printf(TEXT("too far (%.0fm, sees %.0fm)"),
+			FVector::Dist(Eyes, TargetLocation) / 100.0f, SightRadius / 100.0f);
+	}
+
+	if (FromApex.SizeSquared() < FMath::Square(NearClippingRadius))
+	{
+		return TEXT("inside near clip (behind its eyes)");
+	}
+
+	const float Angle = FMath::RadiansToDegrees(FMath::Acos(FVector::DotProduct(FromApex.GetSafeNormal(), Forward)));
+	if (Angle > PeripheralVisionAngle)
+	{
+		return FString::Printf(TEXT("outside view cone (%.0f deg, sees %.0f)"), Angle, PeripheralVisionAngle);
+	}
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(DinoVisionTest), true, Self);
+	FHitResult Hit;
+	if (World->LineTraceSingleByChannel(Hit, Eyes, TargetLocation, ECC_Visibility, Params)
+		&& Hit.GetActor() != Target && !(Hit.GetActor() && Hit.GetActor()->IsOwnedBy(Target)))
+	{
+		return FString::Printf(TEXT("blocked by %s"), *GetNameSafe(Hit.GetActor()));
+	}
+
+	return FString::Printf(TEXT("clear line (%.0fm, %.0f deg)"), FVector::Dist(Eyes, TargetLocation) / 100.0f, Angle);
+}
+
+void ADinoAIControllerBase::DrawVisionTest(const UWorld* World, float Lifetime) const
+{
+	const APawn* Self = GetPawn();
+	if (!bVisionTest || !World || !Self)
+	{
+		return;
+	}
+
+	FVector Eyes;
+	FRotator ViewRotation;
+	GetActorEyesViewPoint(Eyes, ViewRotation);
+	const FVector Forward = ViewRotation.Vector();
+	const FVector Apex = Eyes - Forward * PointOfViewBackwardOffset;
+	const float Range = SightRadius + PointOfViewBackwardOffset;
+	const float HalfAngle = FMath::DegreesToRadians(PeripheralVisionAngle);
+	const FColor FanColour(255, 220, 60);
+
+	// The fan at eye height: its edges and the arc where range runs out. The real cone is
+	// three-dimensional - the same angle applies up and down - but a flat fan is what can be
+	// read from a player's eye level.
+	const FVector FlatForward = Forward.GetSafeNormal2D().IsNearlyZero() ? Self->GetActorForwardVector() : Forward.GetSafeNormal2D();
+	const FVector LeftEdge = FlatForward.RotateAngleAxis(-PeripheralVisionAngle, FVector::UpVector);
+	const FVector RightEdge = FlatForward.RotateAngleAxis(PeripheralVisionAngle, FVector::UpVector);
+	DrawDebugLine(World, Apex, Apex + LeftEdge * Range, FanColour, false, Lifetime, 0, 2.0f);
+	DrawDebugLine(World, Apex, Apex + RightEdge * Range, FanColour, false, Lifetime, 0, 2.0f);
+	DrawDebugCircleArc(World, Apex, Range, FlatForward, HalfAngle, 32, FanColour, false, Lifetime, 0, 2.0f);
+	if (NearClippingRadius > 0.0f)
+	{
+		DrawDebugCircleArc(World, Apex, NearClippingRadius, FlatForward, HalfAngle, 12, FanColour, false, Lifetime, 0, 1.0f);
+	}
+
+	TArray<AActor*> InSight;
+	if (Perception)
+	{
+		Perception->GetCurrentlyPerceivedActors(UAISense_Sight::StaticClass(), InSight);
+	}
+
+	for (TActorIterator<ADinoCharacter> It(World); It; ++It)
+	{
+		const ADinoCharacter* Player = *It;
+		if (!IsValidTarget(Player))
+		{
+			continue;
+		}
+
+		// The verdict is perception's; the reason is worked out here alongside it. If they ever
+		// disagree for more than a moment, that disagreement is the bug.
+		const bool bSeen = InSight.Contains(Player);
+		const FColor Colour = bSeen ? FColor(60, 230, 90) : FColor(230, 60, 60);
+		const FVector Target = Player->GetActorLocation();
+
+		DrawDebugLine(World, Eyes, Target, Colour, false, Lifetime, 0, bSeen ? 3.0f : 1.5f);
+		DrawDebugSphere(World, Target, 20.0f, 8, Colour, false, Lifetime, 0, 2.0f);
+		DrawDebugString(World, (Eyes + Target) * 0.5f,
+			FString::Printf(TEXT("%s: %s"), bSeen ? TEXT("SEES") : TEXT("can't see"), *ExplainSight(Player)),
+			nullptr, Colour, Lifetime, true);
+	}
 }
 
 // --- Chasing ----------------------------------------------------------------------------------

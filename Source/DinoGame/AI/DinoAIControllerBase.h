@@ -149,6 +149,25 @@ public:
 
 	bool IsAwarenessLocked() const { return bAwarenessLocked; }
 
+	// --- Vision test ---------------------------------------------------------------------------
+	// Answers one question: from where it stands and the way it faces, can this creature see a
+	// player *right now*? The StateTree is paused, so it never moves, turns or attacks, and
+	// awareness is rebuilt from what sight currently reports every time it is checked: Hunting if
+	// a player is in sight this instant, Unaware if not. Nothing carries over between checks - no
+	// hunt persistence, no search, no memory, no eyes left tracking a target, and no wider
+	// lose-sight radius for something already seen.
+
+	/** Server only. Turning it off resumes normal AI from whatever it can see at that moment. */
+	void SetVisionTest(bool bEnable);
+
+	bool IsInVisionTest() const { return bVisionTest; }
+
+	/**
+	 * Draws the sight fan, and a line to every living player: green if seen, red if not, labelled
+	 * with the reason. Host only - the perception data lives with the controller.
+	 */
+	void DrawVisionTest(const UWorld* World, float Lifetime) const;
+
 	// --- Combat ------------------------------------------------------------------------------
 
 	/** This creature's attack, or null for one that never attacks. */
@@ -466,6 +485,21 @@ private:
 
 	/** While true, only the debug path may change awareness. */
 	bool bAwarenessLocked = false;
+
+	/** Pushes the sight properties into the sense. LoseSightRadius collapses to SightRadius in a vision test. */
+	void ApplySightConfig();
+
+	/** Vision test: rebuilds target and awareness from what sight reports this instant. */
+	void RefreshVisionTest();
+
+	/**
+	 * Why sight does or does not reach Target, worked out the way UAISense_Sight does it: range
+	 * and cone from the pulled-back apex, then one Visibility trace from the eyes to the target's
+	 * actor location. A readout for DrawVisionTest; the verdict itself comes from perception.
+	 */
+	FString ExplainSight(const AActor* Target) const;
+
+	bool bVisionTest = false;
 
 	void OnSearchQueryFinished(TSharedPtr<FEnvQueryResult> Result);
 

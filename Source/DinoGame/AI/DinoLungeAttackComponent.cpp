@@ -86,6 +86,17 @@ void UDinoLungeAttackComponent::TickPhase(float DeltaTime)
 	else if (Phase == EDinoAttackPhase::Lunge)
 	{
 		TryBite();
+
+		// Landed short - on a rise, or a ledge - and caught nobody: the jump is over. Without this
+		// it would skid along the ground for the rest of the jump's time. Only from halfway on,
+		// because for the first frame or two of a jump it is still standing on the floor it left.
+		const UCharacterMovementComponent* Movement = Creature->GetCharacterMovement();
+		if (Phase == EDinoAttackPhase::Lunge && LungeArcHeight > 0.0f && Movement && Movement->IsMovingOnGround()
+			&& GetTimeSeconds() - PhaseStartedAt > LungeDuration * 0.5f)
+		{
+			StopTimedMove();
+			SetPhase(EDinoAttackPhase::Recovery, RecoveryDuration);
+		}
 	}
 }
 
@@ -98,7 +109,7 @@ void UDinoLungeAttackComponent::OnPhaseTimerElapsed()
 		break;
 
 	case EDinoAttackPhase::Lunge:
-		// The dash ran its full length without catching anyone.
+		// The pounce ran its full length without catching anyone.
 		StopTimedMove();
 		SetPhase(EDinoAttackPhase::Recovery, RecoveryDuration);
 		break;
@@ -124,7 +135,17 @@ void UDinoLungeAttackComponent::BeginLunge()
 
 	// Locked now, at the end of the windup - this is what makes a sidestep work.
 	LungeDirection = Creature->GetActorForwardVector().GetSafeNormal2D();
-	ApplyTimedMove(Creature->GetActorLocation() + LungeDirection * LungeDistance, LungeDuration, TEXT("DinoLunge"));
+
+	// The engine's jump arc: a parabola peaking at Height halfway along. The upward part of the
+	// root motion lifts the creature off the floor into falling by itself, and it lands through
+	// the ordinary falling code. Same setup as Epic's AbilityTask_ApplyRootMotionJumpForce.
+	TSharedPtr<FRootMotionSource_JumpForce> Pounce = MakeShared<FRootMotionSource_JumpForce>();
+	Pounce->InstanceName = TEXT("DinoPounce");
+	Pounce->Duration = LungeDuration;
+	Pounce->Rotation = LungeDirection.Rotation();
+	Pounce->Distance = LungeDistance;
+	Pounce->Height = LungeArcHeight;
+	ApplyRootMotion(Pounce);
 
 	SetPhase(EDinoAttackPhase::Lunge, LungeDuration, true);
 }
@@ -132,8 +153,25 @@ void UDinoLungeAttackComponent::BeginLunge()
 void UDinoLungeAttackComponent::ApplyTimedMove(const FVector& Target, float Duration, FName InstanceName)
 {
 	const ADinoCreature* Creature = GetCreature();
+	if (!Creature)
+	{
+		return;
+	}
+
+	TSharedPtr<FRootMotionSource_MoveToForce> Move = MakeShared<FRootMotionSource_MoveToForce>();
+	Move->InstanceName = InstanceName;
+	Move->Duration = Duration;
+	Move->StartLocation = Creature->GetActorLocation();
+	Move->TargetLocation = Target;
+	Move->bRestrictSpeedToExpected = false;
+	ApplyRootMotion(Move);
+}
+
+void UDinoLungeAttackComponent::ApplyRootMotion(const TSharedPtr<FRootMotionSource>& Move)
+{
+	const ADinoCreature* Creature = GetCreature();
 	UCharacterMovementComponent* Movement = Creature ? Creature->GetCharacterMovement() : nullptr;
-	if (!Movement)
+	if (!Movement || !Move.IsValid())
 	{
 		return;
 	}
@@ -142,19 +180,13 @@ void UDinoLungeAttackComponent::ApplyTimedMove(const FVector& Target, float Dura
 
 	// Root motion rather than launching or setting velocity: an exact distance over an exact
 	// time, swept through collision by the movement component so it cannot tunnel through a
-	// wall, and replicated as ordinary movement. Same setup as Epic's
-	// AbilityTask_ApplyRootMotionMoveToForce.
-	TSharedPtr<FRootMotionSource_MoveToForce> Move = MakeShared<FRootMotionSource_MoveToForce>();
-	Move->InstanceName = InstanceName;
+	// wall, and replicated as ordinary movement.
 	Move->AccumulateMode = ERootMotionAccumulateMode::Override;
 	Move->Priority = 500;
-	Move->Duration = Duration;
-	Move->StartLocation = Creature->GetActorLocation();
-	Move->TargetLocation = Target;
-	Move->bRestrictSpeedToExpected = false;
 
 	// The default, MaintainLastRootMotionVelocity, keeps full speed once the source ends, and the
-	// creature slides on past the end of its move. Stop dead instead.
+	// creature slides on past the end of its move. Stop dead instead - in the air, that means it
+	// simply drops the rest of the way under gravity.
 	Move->FinishVelocityParams.Mode = ERootMotionFinishVelocityMode::SetVelocity;
 	Move->FinishVelocityParams.SetVelocity = FVector::ZeroVector;
 
@@ -279,10 +311,9 @@ void UDinoLungeAttackComponent::SettleOverVictim(ADinoCharacter* Victim)
 		Creature->SetActorRotation(FRotator(0.0f, TowardHead.Rotation().Yaw, 0.0f));
 	}
 
-	// The victim's spot is on the ground; the raptor keeps its own height, so it stands on the
-	// floor at that point rather than being pushed into it.
-	FVector Target = Victim->GetPinnedCaptorSpot();
-	Target.Z = Creature->GetActorLocation().Z;
+	// The victim's spot is on the ground; the raptor's capsule centre goes its own half height
+	// above that. Not its current height, which mid-pounce may be well off the floor.
+	const FVector Target = Victim->GetPinnedCaptorSpot() + FVector(0.0f, 0.0f, Capsule->GetScaledCapsuleHalfHeight());
 
 	if (PinSettleDuration > 0.0f)
 	{

@@ -273,7 +273,18 @@ void ADinoCreature::BroadcastAwarenessChange(EDinoAwareness OldAwareness)
 
 void ADinoCreature::DrawStateDebug()
 {
-	if (CVarDinoAIDebugDraw.GetValueOnGameThread() == 0)
+	// A vision test draws whether or not debug draw is on: without the lines it shows nothing.
+	const ADinoAIControllerBase* VisionTest = Cast<ADinoAIControllerBase>(GetController());
+	if (VisionTest && VisionTest->IsInVisionTest())
+	{
+		VisionTest->DrawVisionTest(GetWorld(), DebugDrawLifetime);
+	}
+	else
+	{
+		VisionTest = nullptr;
+	}
+
+	if (CVarDinoAIDebugDraw.GetValueOnGameThread() == 0 && !VisionTest)
 	{
 		return;
 	}

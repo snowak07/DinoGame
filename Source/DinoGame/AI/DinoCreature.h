@@ -64,6 +64,15 @@ public:
 	float TurnRateDegreesPerSecond = 180.0f;
 
 	/**
+	 * Placed-in-level only. Starts this creature in a vision test: it stays exactly where and
+	 * how it was placed, never moves or attacks, and only reports whether it can see a player at
+	 * this instant - see ADinoAIControllerBase::SetVisionTest. DinoVisionTest toggles every
+	 * creature at runtime as well.
+	 */
+	UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category = "Dino|AI|Debug")
+	bool bVisionTestOnStart = false;
+
+	/**
 	 * Height of the creature's eyes above its feet, in world units. Zero keeps the engine default.
 	 *
 	 * This is where the creature sees from: AI sight traces run from here, so it decides what

@@ -136,6 +136,14 @@ public:
 	UFUNCTION(Exec)
 	void DinoHitDino(float Damage = 25.0f);
 
+	/**
+	 * Vision test on every creature: "DinoVisionTest on", "DinoVisionTest off", or no argument to
+	 * toggle. Creatures freeze where they stand and show, moment to moment, whether they can see
+	 * you - see ADinoAIControllerBase::SetVisionTest.
+	 */
+	UFUNCTION(Exec)
+	void DinoVisionTest(const FString& Mode = TEXT("toggle"));
+
 	/** Re-shows the build version on screen. Not scaffolding — playtesters need this. */
 	UFUNCTION(Exec)
 	void DinoBuildVersion();

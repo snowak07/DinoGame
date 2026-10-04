@@ -647,6 +647,56 @@ void ADinoPlayerController::DinoSetState(const FString& DesiredState)
 	}
 }
 
+void ADinoPlayerController::DinoVisionTest(const FString& Mode)
+{
+	if (!HasAuthority())
+	{
+		DinoScreenError(TEXT("DinoVisionTest only works on the host - AI runs there."));
+		return;
+	}
+
+	TArray<ADinoAIControllerBase*> Creatures;
+	bool bAllInTest = true;
+	for (TActorIterator<ADinoAIControllerBase> It(GetWorld()); It; ++It)
+	{
+		Creatures.Add(*It);
+		bAllInTest &= It->IsInVisionTest();
+	}
+
+	if (Creatures.IsEmpty())
+	{
+		DinoScreenError(TEXT("No AI creatures in the level."));
+		return;
+	}
+
+	// Toggle switches everything on unless everything is already on - so with a mix of placed
+	// test creatures and normal ones, the first toggle brings them all into line.
+	bool bEnable = !bAllInTest;
+	if (Mode.Equals(TEXT("on"), ESearchCase::IgnoreCase) || Mode == TEXT("1"))
+	{
+		bEnable = true;
+	}
+	else if (Mode.Equals(TEXT("off"), ESearchCase::IgnoreCase) || Mode == TEXT("0"))
+	{
+		bEnable = false;
+	}
+	else if (!Mode.Equals(TEXT("toggle"), ESearchCase::IgnoreCase))
+	{
+		DinoScreenError(FString::Printf(TEXT("Unknown mode \"%s\". Use on, off, or nothing to toggle."), *Mode));
+		return;
+	}
+
+	for (ADinoAIControllerBase* Creature : Creatures)
+	{
+		Creature->SetVisionTest(bEnable);
+	}
+
+	DinoScreenLog(bEnable
+		? FString::Printf(TEXT("Vision test ON for %d creature(s): frozen, no memory. Green line = sees you, red = can't (with the reason)."), Creatures.Num())
+		: FString::Printf(TEXT("Vision test OFF for %d creature(s): normal AI resumed."), Creatures.Num()),
+		FColor(255, 220, 60), 8.0f);
+}
+
 void ADinoPlayerController::DinoHitDino(float Damage)
 {
 	// Creature damage is decided where the AI runs. A client applying it locally would change

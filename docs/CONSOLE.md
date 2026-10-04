@@ -28,6 +28,7 @@ counts as the host. With several PIE players, use the server's window.
 | `DinoSetState <state>` | yes | Force every creature into a state and lock it there |
 | `DinoSetState auto` | yes | Release the lock; perception takes over again |
 | `DinoHitDino [damage]` | yes | Hit the nearest living creature. Damage defaults to 25 |
+| `DinoVisionTest [on\|off]` | yes | Freeze every creature and show, moment to moment, whether it can see you. No argument toggles |
 
 `DinoSetState` takes partial names: `unaware`, `sus`, `alert`, `hunt`, `search`, `att`.
 Use `att` rather than `a` — `a` matches **Alerted** first.
@@ -36,6 +37,25 @@ Use `att` rather than `a` — `a` matches **Alerted** first.
 health; the flare gun (LMB) is the real weapon and goes through the same damage path. It picks
 the *nearest* living creature, including one with its AI switched off, so stand closer to the one
 you mean.
+
+### Vision test
+
+`DinoVisionTest` answers one question: *from where it stands, facing the way it faces, can this
+creature see me right now?* Creatures stop moving, turning and attacking, and keep no memory:
+no 3-second hunt linger, no search, no eyes left following you, no wider "lose sight" range
+for someone already seen. Capsule goes red the instant you are in sight and grey the instant
+you are not. `DinoVisionTest off` resumes normal AI.
+
+For fixed test positions, place creatures in the level, rotate them to face where you want,
+and tick **Vision Test On Start** (Details → Dino | AI | Debug) on each one. They start frozen.
+
+| Shape | Meaning |
+|---|---|
+| Yellow fan | Sight range and field of view, at eye height |
+| Green line to you | Sees you, with the distance and angle |
+| Red line to you | Cannot, with why: too far, outside the cone, or blocked by *which actor* |
+
+Draws on the host whether or not debug draw is on.
 
 ### Console variables
 

@@ -5,10 +5,11 @@
 #include "DinoLungeAttackComponent.generated.h"
 
 /**
- * Raptor attack: telegraph, dash, bite, pin.
+ * Raptor attack: telegraph, pounce, bite, pin.
  *
  * Windup - stops and turns to face the target. The dodge window.
- * Lunge  - dashes a fixed distance along its facing, biting the first valid player it reaches.
+ * Lunge  - pounces a fixed distance along its facing in a low arc, biting the first valid player
+ *          it reaches.
  * Hit    - the victim is pinned and takes damage over time until an ally staggers the raptor.
  * Miss   - a recovery pause, then a cooldown. The punish window.
  *
@@ -43,13 +44,23 @@ protected:
 
 	/** The telegraph. Longer is fairer; shorter is scarier. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Attack", meta = (ClampMin = "0.0"))
-	float WindupDuration = 0.6f;
+	float WindupDuration = 0.45f;
 
+	/** How far the pounce carries, along the ground. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Attack", meta = (ClampMin = "0.0"))
-	float LungeDistance = 500.0f;
+	float LungeDistance = 600.0f;
 
+	/** Seconds in the air. With the distance, sets how fast the pounce is. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Attack", meta = (ClampMin = "0.05"))
-	float LungeDuration = 0.35f;
+	float LungeDuration = 0.45f;
+
+	/**
+	 * Peak height of the pounce above where it took off, reached halfway. 0 is a flat dash along
+	 * the ground. Too high and it sails over a crouching or short target - the bite sphere rises
+	 * with the raptor.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Attack", meta = (ClampMin = "0.0"))
+	float LungeArcHeight = 90.0f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Attack", meta = (ClampMin = "1.0"))
 	float BiteRadius = 150.0f;
@@ -109,8 +120,11 @@ private:
 	/** Lets the capsules overlap again. Safe to call when not settled. */
 	void StopIgnoringVictim();
 
-	/** A timed, swept move to Target - see BeginLunge for why root motion. Replaces any current one. */
+	/** A timed, swept move in a straight line to Target. Replaces any current one. */
 	void ApplyTimedMove(const FVector& Target, float Duration, FName InstanceName);
+
+	/** Applies a root motion source with the settings every move here shares, replacing any current one. */
+	void ApplyRootMotion(const TSharedPtr<struct FRootMotionSource>& Move);
 	void StopTimedMove();
 
 	/**
