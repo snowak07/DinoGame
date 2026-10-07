@@ -74,6 +74,8 @@ Draws on the host whether or not debug draw is on.
 | Small grey sphere | The next search point, already chosen |
 | Magenta sphere + circle | Search centre and current search radius |
 | Yellow sphere | Where it predicts you went |
+| Grey sphere + circle (idle) | Home, and how far it wanders from it |
+| Grey sphere + line (idle) | Where it is strolling to |
 | Orange cone (T-Rex) | Mouth zone — stand in it and you are eaten |
 | Yellow line + sphere (raptor) | Where the lunge will land if it launched now |
 | Red sphere (raptor) | Bite, during the lunge |

@@ -7,8 +7,8 @@
 class AAIController;
 
 /**
- * StateTree tasks that act rather than move - attacking now, and the future scan-pause at each
- * search point.
+ * StateTree tasks that act rather than drive a single move - attacking, idling, and the future
+ * scan-pause at each search point.
  *
  * Separate from DinoMoveTasks because those all subclass FStateTreeMoveToTask and reuse its
  * instance data. These derive from FStateTreeAIActionTaskBase and declare their own, which
@@ -46,6 +46,31 @@ struct FDinoActionTaskInstanceData
  */
 USTRUCT(meta = (DisplayName = "Dino Attack", Category = "Dino|AI"))
 struct DINOGAME_API FDinoAttackTask : public FStateTreeAIActionTaskBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FDinoActionTaskInstanceData;
+
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+
+	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
+	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const override;
+	virtual void ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
+};
+
+/**
+ * Mills about while there is nothing to hunt. Put this in the Idle state - the one the
+ * Dino.Awareness.Unaware event goes to.
+ *
+ * The behaviour itself - stroll, stop, look around, stroll on - lives in the controller's Idle
+ * component, where it is tuned per species. This task only starts it on entry, ticks it, and
+ * stops it on exit, so wandering can never outlive the state.
+ *
+ * Never completes, for the same reason as every other state here: a completed state with no
+ * completion transition falls back to Root. Unaware is left only on an awareness event.
+ */
+USTRUCT(meta = (DisplayName = "Dino Idle", Category = "Dino|AI"))
+struct DINOGAME_API FDinoIdleTask : public FStateTreeAIActionTaskBase
 {
 	GENERATED_BODY()
 

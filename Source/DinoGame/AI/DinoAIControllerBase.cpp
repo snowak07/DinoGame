@@ -2,6 +2,8 @@
 
 #include "AI/DinoAttackComponent.h"
 #include "AI/DinoCreature.h"
+#include "AI/DinoIdleComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "DinoCharacter.h"
 #include "DinoGame.h"
 #include "Perception/AISense_Sight.h"
@@ -84,6 +86,7 @@ ADinoAIControllerBase::ADinoAIControllerBase()
 	Perception->SetDominantSense(SightConfig->GetSenseImplementation());
 
 	StateTreeAI = CreateDefaultSubobject<UStateTreeAIComponent>(TEXT("StateTreeAI"));
+	Idle = CreateDefaultSubobject<UDinoIdleComponent>(TEXT("Idle"));
 
 	// Started explicitly in OnPossess instead, so it runs only on the server and only once
 	// there is actually a pawn to act on. Automatic start would fire on clients too, where
@@ -705,6 +708,10 @@ void ADinoAIControllerBase::SetVisionTest(bool bEnable)
 	GetWorldTimerManager().ClearTimer(SearchLegTimer);
 	ClearFocus(EAIFocusPriority::Gameplay);
 	StopChase();
+	if (Idle)
+	{
+		Idle->EndIdle();
+	}
 	StopMovement();
 	CurrentTarget = nullptr;
 	bHasLiveContact = false;
@@ -973,6 +980,12 @@ void ADinoAIControllerBase::HandleCreatureDied()
 	GetWorldTimerManager().ClearTimer(LostSightTimer);
 	GetWorldTimerManager().ClearTimer(SearchLegTimer);
 
+	// Before stopping movement, so the walking speed it restores is not left at a stroll.
+	if (Idle)
+	{
+		Idle->EndIdle();
+	}
+
 	StopMovement();
 	ClearFocus(EAIFocusPriority::Gameplay);
 
@@ -1154,6 +1167,19 @@ void ADinoAIControllerBase::OnSearchQueryFinished(TSharedPtr<FEnvQueryResult> Re
 	}
 }
 
+ANavigationData* ADinoAIControllerBase::GetCreatureNavData() const
+{
+	const UNavigationSystemV1* Nav = UNavigationSystemV1::GetCurrent(GetWorld());
+	if (!Nav || !GetPawn())
+	{
+		return nullptr;
+	}
+
+	// The same choice path following makes: the agent properties come from the pawn's movement
+	// component, which sizes them from the capsule.
+	return Nav->GetNavDataForProps(GetNavAgentPropertiesRef(), GetNavAgentLocation());
+}
+
 bool ADinoAIControllerBase::PickFallbackSearchPoint(FVector& OutPoint) const
 {
 	const UNavigationSystemV1* Nav = UNavigationSystemV1::GetCurrent(GetWorld());
@@ -1176,7 +1202,7 @@ bool ADinoAIControllerBase::PickFallbackSearchPoint(FVector& OutPoint) const
 	const float MinLegDistance = 400.0f;
 	for (int32 Attempt = 0; Attempt < 8; ++Attempt)
 	{
-	if (Nav->GetRandomReachablePointInRadius(Origin, CurrentSearchRadius(), Found))
+		if (Nav->GetRandomReachablePointInRadius(Origin, CurrentSearchRadius(), Found, GetCreatureNavData()))
 		{
 			if (FVector::Dist2D(Found.Location, Self->GetActorLocation()) >= MinLegDistance)
 			{
@@ -1305,10 +1331,34 @@ void ADinoAIControllerBase::RunSetupCheck(TArray<FString>& OutLines) const
 	// Standing on navmesh is the difference between "cannot path" and "will not path".
 	if (Nav && MyPawn)
 	{
+		const ANavigationData* NavData = GetCreatureNavData();
+
 		FNavLocation Projected;
-		const bool bOnNav = Nav->ProjectPointToNavigation(MyPawn->GetActorLocation(), Projected, FVector(300.0f));
+		const bool bOnNav = NavData && Nav->ProjectPointToNavigation(MyPawn->GetActorLocation(), Projected, FVector(300.0f), NavData);
 		Report(bOnNav, TEXT("creature is on navmesh"),
-			bOnNav ? TEXT("") : TEXT("no NavMeshBoundsVolume here, or agent size excludes it"));
+			bOnNav ? TEXT("") : TEXT("no NavMeshBoundsVolume here, its navmesh is not built yet, or agent size excludes it"));
+
+		// Which navmesh it was matched to, and whether it actually fits that agent. A capsule
+		// wider than its agent is routed through gaps it cannot pass, and scrapes walls and
+		// corners; one much narrower is kept out of gaps it could use.
+		const FNavAgentProperties& Props = GetNavAgentPropertiesRef();
+		const UCapsuleComponent* Capsule = MyPawn->FindComponentByClass<UCapsuleComponent>();
+		const float CapsuleRadius = Capsule ? Capsule->GetScaledCapsuleRadius() : Props.AgentRadius;
+		const float CapsuleHeight = Capsule ? Capsule->GetScaledCapsuleHalfHeight() * 2.0f : Props.AgentHeight;
+
+		if (NavData)
+		{
+			const FNavDataConfig& Agent = NavData->GetConfig();
+			const bool bFits = CapsuleRadius <= Agent.AgentRadius + 1.0f && CapsuleHeight <= Agent.AgentHeight + 1.0f;
+			Report(bFits, TEXT("navmesh agent fits the capsule"),
+				FString::Printf(TEXT("using %s (agent r%.0f h%.0f), capsule r%.0f h%.0f%s"),
+					*Agent.Name.ToString(), Agent.AgentRadius, Agent.AgentHeight, CapsuleRadius, CapsuleHeight,
+					bFits ? TEXT("") : TEXT(" - bigger than every agent; add one to SupportedAgents in DefaultEngine.ini")));
+		}
+		else
+		{
+			Report(false, TEXT("navmesh agent fits the capsule"), TEXT("no navmesh matched this creature's size"));
+		}
 	}
 
 	Report(!bAwarenessLocked, TEXT("awareness not debug-locked"),
@@ -1325,6 +1375,10 @@ void ADinoAIControllerBase::RunSetupCheck(TArray<FString>& OutLines) const
 	if (AttackComponent)
 	{
 		AttackComponent->AppendSetupCheck(OutLines);
+	}
+	if (Idle)
+	{
+		Idle->AppendSetupCheck(OutLines);
 	}
 	if (Creature)
 	{

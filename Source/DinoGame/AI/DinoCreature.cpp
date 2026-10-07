@@ -2,6 +2,7 @@
 
 #include "AI/DinoAIControllerBase.h"
 #include "AI/DinoAttackComponent.h"
+#include "AI/DinoIdleComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "DinoGame.h"
@@ -352,6 +353,14 @@ void ADinoCreature::DrawStateDebug()
 		else if (Awareness == EDinoAwareness::Hunting)
 		{
 			Label += TEXT("\n") + Diag->DescribeChase();
+		}
+		else if (Awareness == EDinoAwareness::Unaware && !Diag->IsInVisionTest())
+		{
+			if (const UDinoIdleComponent* Idle = Diag->GetIdleComponent())
+			{
+				Label += TEXT("\n") + Idle->DescribeIdle();
+				Idle->DrawDebug(World, DebugDrawLifetime);
+			}
 		}
 	}
 

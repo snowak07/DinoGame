@@ -1,15 +1,60 @@
 #include "AI/DinoActionTasks.h"
 
 #include "AI/DinoAIControllerBase.h"
+#include "AI/DinoIdleComponent.h"
 #include "DinoGame.h"
 #include "StateTreeExecutionContext.h"
 
 namespace
 {
-	ADinoAIControllerBase* ResolveController(FStateTreeExecutionContext& Context, const FDinoAttackTask& Task)
+	template <typename TaskType>
+	ADinoAIControllerBase* ResolveController(FStateTreeExecutionContext& Context, const TaskType& Task)
 	{
 		const FDinoActionTaskInstanceData& InstanceData = Context.GetInstanceData(Task);
 		return Cast<ADinoAIControllerBase>(InstanceData.AIController);
+	}
+
+	UDinoIdleComponent* ResolveIdle(FStateTreeExecutionContext& Context, const FDinoIdleTask& Task)
+	{
+		const ADinoAIControllerBase* Controller = ResolveController(Context, Task);
+		return Controller ? Controller->GetIdleComponent() : nullptr;
+	}
+}
+
+EStateTreeRunStatus FDinoIdleTask::EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
+{
+	UDinoIdleComponent* Idle = ResolveIdle(Context, *this);
+	if (!Idle)
+	{
+		UE_LOG(LogDinoGame, Warning, TEXT("Dino Idle: no DinoAIControllerBase in context."));
+		return EStateTreeRunStatus::Failed;
+	}
+
+	Idle->BeginIdle();
+	return EStateTreeRunStatus::Running;
+}
+
+EStateTreeRunStatus FDinoIdleTask::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
+{
+	if (UDinoIdleComponent* Idle = ResolveIdle(Context, *this))
+	{
+		Idle->TickIdle(DeltaTime);
+	}
+
+	return EStateTreeRunStatus::Running;
+}
+
+void FDinoIdleTask::ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
+{
+	// Sustained means the state was reselected while staying active; it keeps wandering.
+	if (Transition.ChangeType != EStateTreeStateChangeType::Changed)
+	{
+		return;
+	}
+
+	if (UDinoIdleComponent* Idle = ResolveIdle(Context, *this))
+	{
+		Idle->EndIdle();
 	}
 }
 

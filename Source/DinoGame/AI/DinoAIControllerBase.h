@@ -9,6 +9,7 @@
 class ADinoCharacter;
 class UAIPerceptionComponent;
 class UDinoAttackComponent;
+class UDinoIdleComponent;
 class UAISenseConfig_Sight;
 class UAISenseConfig_Hearing;
 class UStateTreeAIComponent;
@@ -81,6 +82,16 @@ public:
 	/** Current effective search radius, for debug draw. */
 	UFUNCTION(BlueprintPure, Category = "Dino|AI")
 	float GetSearchRadiusForDebug() const { return CurrentSearchRadius(); }
+
+	/** The Unaware behaviour - milling about. Driven by the Dino Idle StateTree task. */
+	UDinoIdleComponent* GetIdleComponent() const { return Idle; }
+
+	/**
+	 * The navmesh this creature was matched to, by its capsule size - see SupportedAgents in
+	 * DefaultEngine.ini. Pass it to every navigation query made here: one that names no navmesh
+	 * is answered from the first agent's, so a raptor would pick points only a T-Rex can reach.
+	 */
+	class ANavigationData* GetCreatureNavData() const;
 
 	/** Recorded by the search task when it issues a move, so debug draw follows reality. */
 	void SetActiveSearchDestination(const FVector& Destination);
@@ -371,6 +382,13 @@ protected:
 	 */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Dino|AI")
 	TObjectPtr<UStateTreeAIComponent> StateTreeAI;
+
+	/**
+	 * What the creature does with nothing to hunt. Created here so every controller Blueprint
+	 * has one; select it in the Components panel to tune wandering per species.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Dino|AI")
+	TObjectPtr<UDinoIdleComponent> Idle;
 
 	// --- Perception output ------------------------------------------------------------
 	// Exposed as properties rather than only through the getters above, because StateTree
