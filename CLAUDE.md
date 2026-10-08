@@ -164,6 +164,12 @@ Tuning lives in `Config/DefaultEngine.ini` under `[Voice]`, `[SystemSettings]`, 
 repackage, not a restart. `VoiPSampleRate` defaults to 16 kHz and sounds like a telephone;
 `voice.JitterBufferDelay` trades latency against choppiness.
 
+**Seamless travel crashes voice chat unless `UDinoVoiceCleanupSubsystem` runs.** The engine gives
+each remote speaker an audio component registered straight into the world, owned by no actor,
+and only clears it after the *next* map loads (`FVoiceEngineImpl::OnPostLoadMap`). Seamless
+travel destroys the old world first, so a restart while someone talks crashed the client on the
+audio thread. The subsystem destroys those components on `OnWorldCleanup`. Do not remove it.
+
 ---
 
 ## Console commands

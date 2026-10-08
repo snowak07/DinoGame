@@ -25,6 +25,8 @@ public class DinoGame : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[] {
 			"OnlineSubsystem",
 			"OnlineSubsystemUtils",
+			// Voice chat's per-speaker audio is a USynthComponent; UDinoVoiceCleanupSubsystem stops it.
+			"AudioMixer",
 			// NavigationSystem is separate from AIModule: perception comes from AIModule,
 			// but UNavigationInvokerComponent and the navmesh types live here.
 			"NavigationSystem",
