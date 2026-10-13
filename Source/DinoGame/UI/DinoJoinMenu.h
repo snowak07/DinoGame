@@ -107,5 +107,15 @@ private:
 	/** True between a button press and its completion delegate. */
 	bool bBusy = false;
 
+	/**
+	 * Steam (or whatever backend is configured) failed to load at startup. Host and Join stay
+	 * disabled and the status line says why, for as long as this menu exists - Steam cannot be
+	 * picked up without restarting the game. See UDinoSessionSubsystem::IsOnlineBackendMissing.
+	 */
+	bool bBackendMissing = false;
+
+	/** Puts the backend problem on the status line. Returns true if there is one. */
+	bool ShowBackendProblemIfAny();
+
 	bool bMainMenuMode = false;
 };

@@ -104,6 +104,10 @@ everywhere.
 In `DinoNetStatus`, `net driver : SteamSocketsNetDriver` means traffic is on Steam's relay.
 `IpNetDriver` means it silently fell back to raw IP.
 
+If Steam wasn't running when the game started, a packaged build refuses `DinoHost`, `DinoHostMap`,
+`DinoJoinCode`, `DinoFind` and `DinoJoin`, says so on screen, and `DinoNetStatus` shows a red
+`PROBLEM` line. Start Steam, then restart the game. Play In Editor is unaffected.
+
 `DinoFind` and `DinoJoin` are scaffolding from before the join menu and will be removed.
 
 ---

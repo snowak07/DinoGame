@@ -76,6 +76,30 @@ first thing to rule out.
 
 ---
 
+## PIE and packaged builds must behave the same
+
+Development happens in Play In Editor (PIE); playtests run the packaged build from itch, over
+Steam, on separate machines. Several playtest bugs only existed in the packaged build. Known
+differences:
+
+| | PIE | Packaged |
+|---|---|---|
+| Round restart | Full reconnect (seamless travel is off in PIE) | Seamless travel |
+| Steam, lobbies, join codes | Not used | Used |
+| Voice chat | Effectively untested | Live, between real machines |
+| Network timing | One process; replication arrives almost instantly and in order | Real latency; things arrive late and out of order |
+| Start | `Lvl_FirstPerson` lobby | Main menu, then host or join |
+| Config | Read live | Baked in at package time |
+
+**Rule:** any change touching travel, sessions, voice, spawning or possession, death, spectating,
+or what replicates when must state how it behaves in *both*. Prefer code that does not depend on
+which one it is, for example waiting for data to arrive instead of assuming it already has.
+Where something can only be proven packaged, say so plainly and test it on two machines before
+the next playtest, rather than calling it done because PIE worked. Turning on
+`net.AllowPIESeamlessTravel 1` brings PIE restarts closer to packaged ones.
+
+---
+
 ## Multiplayer
 
 Player-hosted **listen server** over **Steam Sockets / Steam Datagram Relay**. Peers are
@@ -83,9 +107,14 @@ addressed by SteamID rather than IP, so Steam handles NAT traversal and the host
 forwarding. `UDinoSessionSubsystem` wraps `IOnlineSession` rather than Steam APIs, so the backend
 can be swapped by changing `DefaultPlatformService`.
 
-**Steam must be running and signed in** on every machine, with a different account per machine.
-A missing Steam client presents as "0 sessions found"; `DinoNetStatus` reports `backend` and
-`LAN fallback`, which is the fastest way to see it.
+**Steam must be running and signed in** on every machine *before the game starts*, with a
+different account per machine. Without it the engine silently falls back to the Null subsystem
+(local network only), and Steam cannot be picked up later without a restart. In a packaged build
+`UDinoSessionSubsystem::IsOnlineBackendMissing` catches this: the main menu says so and Host and
+Join stay disabled, as do the `DinoHost` / `DinoJoinCode` / `DinoFind` commands. The editor is
+exempt, because PIE never loads Steam. `DinoNetStatus` shows `backend`, `LAN fallback`, and a
+red `PROBLEM` line in this state. The log line to look for is
+`SteamAPI failed to initialize: Cannot create IPC pipe to Steam client process`.
 
 `SteamDevAppId=480` is Valve's shared Spacewar test ID, so a plain session search returns other
 developers' lobbies. That is why joining is by **join code** rather than a server browser.
@@ -169,6 +198,11 @@ each remote speaker an audio component registered straight into the world, owned
 and only clears it after the *next* map loads (`FVoiceEngineImpl::OnPostLoadMap`). Seamless
 travel destroys the old world first, so a restart while someone talks crashed the client on the
 audio thread. The subsystem destroys those components on `OnWorldCleanup`. Do not remove it.
+
+**Push-to-talk must stay off in config** (`[/Script/Engine.GameSession] bRequiresPushToTalk=False`
+in `DefaultGame.ini`). The engine default is on, and the server re-applies it to every player each
+time it sets them up (`AGameModeBase::GenericPlayerInitialization`), which includes every seamless
+restart. With it on, every mic switched off at each restart and stayed off.
 
 ---
 

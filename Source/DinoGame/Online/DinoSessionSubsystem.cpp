@@ -8,6 +8,7 @@
 #include "GameFramework/GameModeBase.h"
 #include "GameMapsSettings.h"
 #include "Kismet/GameplayStatics.h"
+#include "Misc/ConfigCacheIni.h"
 #include "Misc/PackageName.h"
 #include "GameFramework/PlayerController.h"
 #include "Online/OnlineSessionNames.h"
@@ -38,6 +39,44 @@ bool UDinoSessionSubsystem::IsLANMode() const
 	return Subsystem == nullptr || Subsystem->GetSubsystemName() == NULL_SUBSYSTEM;
 }
 
+namespace
+{
+	/** The backend the game is configured to use, e.g. "Steam". Empty if none is configured. */
+	FString GetConfiguredBackendName()
+	{
+		FString Configured;
+		if (GConfig)
+		{
+			GConfig->GetString(TEXT("OnlineSubsystem"), TEXT("DefaultPlatformService"), Configured, GEngineIni);
+		}
+		return Configured;
+	}
+}
+
+bool UDinoSessionSubsystem::IsOnlineBackendMissing() const
+{
+	if (GIsEditor || !IsLANMode())
+	{
+		return false;
+	}
+
+	// Running on the Null subsystem is only a problem if something else was asked for.
+	const FString Configured = GetConfiguredBackendName();
+	return !Configured.IsEmpty() && !Configured.Equals(TEXT("Null"), ESearchCase::IgnoreCase);
+}
+
+FString UDinoSessionSubsystem::GetOnlineBackendProblem() const
+{
+	if (!IsOnlineBackendMissing())
+	{
+		return FString();
+	}
+
+	const FString Backend = GetConfiguredBackendName();
+	return FString::Printf(TEXT("%s isn't running, so you can't host or join. Start %s and sign in, then restart the game."),
+		*Backend, *Backend);
+}
+
 bool UDinoSessionSubsystem::IsInSession() const
 {
 	const IOnlineSessionPtr Sessions = GetSessions();
@@ -46,6 +85,13 @@ bool UDinoSessionSubsystem::IsInSession() const
 
 void UDinoSessionSubsystem::HostSession(const FString& MapName, int32 MaxPlayers, bool bPrivate)
 {
+	if (IsOnlineBackendMissing())
+	{
+		DinoScreenError(GetOnlineBackendProblem());
+		OnHostComplete.Broadcast(false);
+		return;
+	}
+
 	const IOnlineSessionPtr Sessions = GetSessions();
 	if (!Sessions.IsValid())
 	{
@@ -170,6 +216,13 @@ void UDinoSessionSubsystem::HandleCreateComplete(FName SessionName, bool bWasSuc
 
 void UDinoSessionSubsystem::FindSessions(int32 MaxResults)
 {
+	if (IsOnlineBackendMissing())
+	{
+		DinoScreenError(GetOnlineBackendProblem());
+		OnFindComplete.Broadcast(false, TArray<FDinoSessionInfo>());
+		return;
+	}
+
 	const IOnlineSessionPtr Sessions = GetSessions();
 	if (!Sessions.IsValid())
 	{
@@ -506,6 +559,13 @@ void UDinoSessionSubsystem::JoinByCode(const FString& JoinCode)
 {
 	const FString Code = NormaliseJoinCode(JoinCode);
 
+	if (IsOnlineBackendMissing())
+	{
+		DinoScreenError(GetOnlineBackendProblem());
+		OnJoinComplete.Broadcast(false);
+		return;
+	}
+
 	if (Code.Len() != JoinCodeLength)
 	{
 		DinoScreenError(FString::Printf(TEXT("Join code must be %d characters. Got \"%s\"."), JoinCodeLength, *Code));
@@ -617,6 +677,10 @@ void UDinoSessionSubsystem::ConsoleNetStatus()
 	DinoScreenLog(FString::Printf(TEXT("  backend     : %s"),
 		Subsystem ? *Subsystem->GetSubsystemName().ToString() : TEXT("<none>")), FColor::White, StatusDuration);
 	DinoScreenLog(FString::Printf(TEXT("  LAN fallback: %s"), IsLANMode() ? TEXT("yes") : TEXT("no")), FColor::White, StatusDuration);
+	if (IsOnlineBackendMissing())
+	{
+		DinoScreenLog(FString::Printf(TEXT("  PROBLEM     : %s"), *GetOnlineBackendProblem()), FColor::Red, StatusDuration);
+	}
 	DinoScreenLog(FString::Printf(TEXT("  in session  : %s"), IsInSession() ? TEXT("yes") : TEXT("no")), FColor::White, StatusDuration);
 
 	if (!World)

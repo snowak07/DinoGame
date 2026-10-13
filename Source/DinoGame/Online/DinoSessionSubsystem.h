@@ -81,6 +81,26 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Dino|Sessions")
 	bool IsLANMode() const;
 
+	/**
+	 * True in a packaged build whose configured backend (DefaultPlatformService, Steam today)
+	 * failed to load - almost always because Steam was not running when the game started.
+	 *
+	 * The engine does not treat that as an error: it quietly falls back to the Null subsystem,
+	 * which hosts and searches on the local network only. A player then gets "No session found"
+	 * for a code that is valid on Steam, with nothing pointing at the real cause. That cost hours
+	 * twice in playtests. So hosting and joining are refused instead, with GetOnlineBackendProblem
+	 * as the reason.
+	 *
+	 * Always false in the editor: PIE never loads Steam, and its LAN fallback is how editor
+	 * multiplayer works. Steam cannot be picked up later either - the game has to be restarted.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Dino|Sessions")
+	bool IsOnlineBackendMissing() const;
+
+	/** What the player should be told when IsOnlineBackendMissing. Empty otherwise. */
+	UFUNCTION(BlueprintPure, Category = "Dino|Sessions")
+	FString GetOnlineBackendProblem() const;
+
 	// --- Join codes ------------------------------------------------------------------------
 	// A short code is the whole join model: the host reads it out, the joiner types it. It is
 	// published as a session setting and used as a search filter, so the joiner never sees a

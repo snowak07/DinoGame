@@ -58,7 +58,25 @@ void UDinoJoinMenu::NativeConstruct()
 	SetIsFocusable(true);
 
 	SetStatus(TEXT(""));
+
+	// Checked when the menu opens, which on the main menu is the first thing a player sees.
+	const UDinoSessionSubsystem* Sessions = GetSessionSubsystem();
+	bBackendMissing = Sessions && Sessions->IsOnlineBackendMissing();
+	ShowBackendProblemIfAny();
+
 	SetBusy(false);
+}
+
+bool UDinoJoinMenu::ShowBackendProblemIfAny()
+{
+	if (!bBackendMissing)
+	{
+		return false;
+	}
+
+	const UDinoSessionSubsystem* Sessions = GetSessionSubsystem();
+	SetStatus(Sessions ? Sessions->GetOnlineBackendProblem() : FString(TEXT("Steam isn't running. Start Steam, then restart the game.")));
+	return true;
 }
 
 FReply UDinoJoinMenu::NativeOnKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent)
@@ -126,14 +144,14 @@ void UDinoJoinMenu::SetBusy(bool bInBusy)
 
 	if (HostButton)
 	{
-		HostButton->SetIsEnabled(!bInBusy);
+		HostButton->SetIsEnabled(!bInBusy && !bBackendMissing);
 	}
 
 	if (JoinButton)
 	{
 		// Also gated on a complete code, so Join cannot be pressed against a half-typed one.
 		const bool bCodeReady = CodeInput && UDinoSessionSubsystem::NormaliseJoinCode(CodeInput->GetText().ToString()).Len() == 6;
-		JoinButton->SetIsEnabled(!bInBusy && bCodeReady);
+		JoinButton->SetIsEnabled(!bInBusy && bCodeReady && !bBackendMissing);
 	}
 }
 
@@ -214,7 +232,10 @@ void UDinoJoinMenu::HandleHostComplete(bool bWasSuccessful)
 
 	if (!bWasSuccessful)
 	{
-		SetStatus(TEXT("Could not create a session. Is Steam running?"));
+		if (!ShowBackendProblemIfAny())
+		{
+			SetStatus(TEXT("Could not create a session. Is Steam running?"));
+		}
 		return;
 	}
 
@@ -241,7 +262,10 @@ void UDinoJoinMenu::HandleJoinComplete(bool bWasSuccessful)
 	{
 		// Deliberately vague about which of the two it was: the subsystem already put the
 		// specific reason on screen, and the common case is simply a mistyped code.
-		SetStatus(TEXT("No session found with that code."));
+		if (!ShowBackendProblemIfAny())
+		{
+			SetStatus(TEXT("No session found with that code."));
+		}
 		return;
 	}
 
