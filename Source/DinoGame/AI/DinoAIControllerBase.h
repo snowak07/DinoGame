@@ -49,6 +49,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Dino|AI")
 	AActor* GetCurrentTarget() const { return CurrentTarget; }
 
+	/** IsValidTarget, for the self-check, so it judges targets by the very rule the AI uses. */
+	bool IsAcceptableTarget(const AActor* Actor) const { return IsValidTarget(Actor); }
+
 	/** Where the target was last perceived. Meaningless while there has never been one. */
 	UFUNCTION(BlueprintPure, Category = "Dino|AI")
 	FVector GetLastKnownLocation() const { return LastKnownLocation; }

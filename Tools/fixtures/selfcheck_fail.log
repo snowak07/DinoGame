@@ -1,0 +1,7 @@
+﻿Log file open, 10/18/26 20:34:52
+[2026.10.19-01.34.55:213][  0]LogDinoGame: Build version: 9d9267d-dirty
+[2026.10.19-01.36.01:100][500]LogDinoGame: DinoSelfCheck[status change]: PASS Push-to-talk off: bRequiresPushToTalk is off
+[2026.10.19-01.36.01:100][500]LogDinoGame: Warning: DinoSelfCheck[status change]: FAIL Voice registered: minerva | engine has no talker for them - their voice plays at full volume from anywhere
+[2026.10.19-01.36.01:100][500]LogDinoGame: DinoSelfCheck[status change]: PASS My view: in my body: possessing my living character
+[2026.10.19-01.36.01:100][500]LogDinoGame: DinoSelfCheck[status change]: 2 passed, 1 failed, 0 skipped - host as Snowak, match InProgress.
+[2026.10.19-01.42.24:562][599]Log file closed, 10/18/26 20:42:24

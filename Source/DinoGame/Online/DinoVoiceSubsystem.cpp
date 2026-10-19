@@ -385,7 +385,17 @@ float UDinoVoiceSubsystem::GetMicSensitivity() const
 	}
 
 	// Never set: show where the ini's threshold falls on the same scale.
-	return FMath::Clamp((ThresholdAtNoSensitivity - GetMicThreshold()) / (ThresholdAtNoSensitivity - ThresholdAtFullSensitivity), 0.0f, 1.0f);
+	return ThresholdToSensitivity(GetMicThreshold());
+}
+
+float UDinoVoiceSubsystem::SensitivityToThreshold(float Sensitivity)
+{
+	return FMath::Lerp(ThresholdAtNoSensitivity, ThresholdAtFullSensitivity, FMath::Clamp(Sensitivity, 0.0f, 1.0f));
+}
+
+float UDinoVoiceSubsystem::ThresholdToSensitivity(float Threshold)
+{
+	return FMath::Clamp((ThresholdAtNoSensitivity - Threshold) / (ThresholdAtNoSensitivity - ThresholdAtFullSensitivity), 0.0f, 1.0f);
 }
 
 void UDinoVoiceSubsystem::SetMicSensitivity(float Sensitivity)
@@ -402,7 +412,7 @@ void UDinoVoiceSubsystem::ApplyMicSensitivity() const
 		return;
 	}
 
-	const float Threshold = FMath::Lerp(ThresholdAtNoSensitivity, ThresholdAtFullSensitivity, MicSensitivity);
+	const float Threshold = SensitivityToThreshold(MicSensitivity);
 
 	// At code priority, not the "game setting" priority UVOIPStatics::SetMicThreshold uses:
 	// these two are set in DefaultEngine.ini [SystemSettings], which outranks game settings, so

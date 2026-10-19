@@ -1,6 +1,7 @@
 #include "Online/DinoVoiceCleanupSubsystem.h"
 
 #include "AudioDevice.h"
+#include "AudioThread.h"
 #include "Components/AudioComponent.h"
 #include "DinoGame.h"
 #include "Engine/World.h"
@@ -19,10 +20,7 @@ void UDinoVoiceCleanupSubsystem::Deinitialize()
 	// Quitting tears the subsystems down before the last world is cleaned up, so the world
 	// cleanup handler never saw it and the engine's check tripped on every quit. Release here.
 	const int32 Released = ReleaseAllSpeakerAudio(nullptr);
-	if (Released > 0)
-	{
-		UE_LOG(LogDinoNet, Log, TEXT("Voice: released %d remote speaker component(s) on shutdown."), Released);
-	}
+	UE_LOG(LogDinoNet, Log, TEXT("Voice: released %d remote speaker component(s) on shutdown."), Released);
 
 	FWorldDelegates::OnWorldCleanup.Remove(WorldCleanupHandle);
 
@@ -38,12 +36,11 @@ void UDinoVoiceCleanupSubsystem::HandleWorldCleanup(UWorld* World, bool /*bSessi
 		return;
 	}
 
+	// Logged even at 0, so a log shows this ran at every map change and how many voices were
+	// live: proof that the restart-while-talking path (n > 0) was actually exercised.
 	const int32 Released = ReleaseAllSpeakerAudio(World);
-	if (Released > 0)
-	{
-		UE_LOG(LogDinoNet, Log, TEXT("Voice: released %d remote speaker component(s) before %s was destroyed."),
-			Released, *World->GetName());
-	}
+	UE_LOG(LogDinoNet, Log, TEXT("Voice: released %d remote speaker component(s) before %s was destroyed."),
+		Released, *World->GetName());
 }
 
 int32 UDinoVoiceCleanupSubsystem::ReleaseAllSpeakerAudio(const UWorld* World)
@@ -66,6 +63,28 @@ int32 UDinoVoiceCleanupSubsystem::ReleaseAllSpeakerAudio(const UWorld* World)
 	return Voices.Num();
 }
 
+void UDinoVoiceCleanupSubsystem::FlushAudioThread(FAudioDevice* AudioDevice)
+{
+	// FlushAudioRenderingCommands belongs to the audio thread: called from the game thread it
+	// pumps the mixer's queue there and trips the engine's IsInAudioThread() ensure, a hitch
+	// and a crash-report folder at every restart while someone talked. Packaged builds run a
+	// separate audio thread, so hop onto it and wait, as FAudioDevice::Flush itself does.
+	if (IsInAudioThread())
+	{
+		AudioDevice->FlushAudioRenderingCommands();
+		return;
+	}
+
+	FAudioThread::RunCommandOnAudioThread([AudioDevice]()
+	{
+		AudioDevice->FlushAudioRenderingCommands();
+	});
+
+	FAudioCommandFence Fence;
+	Fence.BeginFence();
+	Fence.Wait();
+}
+
 void UDinoVoiceCleanupSubsystem::ReleaseSpeakerAudio(UVoipListenerSynthComponent* Voice)
 {
 	if (!IsValid(Voice))
@@ -80,7 +99,7 @@ void UDinoVoiceCleanupSubsystem::ReleaseSpeakerAudio(UVoipListenerSynthComponent
 	{
 		if (FAudioDevice* AudioDevice = World->GetAudioDeviceRaw())
 		{
-			AudioDevice->FlushAudioRenderingCommands();
+			FlushAudioThread(AudioDevice);
 		}
 	}
 

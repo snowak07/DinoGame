@@ -9,5 +9,8 @@ public class DinoGameEditorTarget : TargetRules
 		DefaultBuildSettings = BuildSettingsVersion.V7;
 		IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_8;
 		ExtraModuleNames.Add("DinoGame");
+
+		// Unit tests: editor-only, so never in a packaged build. See Tools/run_tests.py.
+		ExtraModuleNames.Add("DinoGameTests");
 	}
 }

@@ -51,6 +51,9 @@ public:
 	 */
 	bool HearsLivingWhileSpectating() const { return bSpectatorHearsLiving; }
 
+	/** Local copy: what this player's spectator camera last told the server. True until it has. */
+	bool LocalHearsLivingWhileSpectating() const { return SentSpectatorHearsLiving.Get(true); }
+
 	/** Local. Called by ADinoSpectatorPawn every frame; only sends when the answer changes. */
 	void SetSpectatorHearsLiving(bool bHearsLiving);
 
@@ -124,6 +127,14 @@ public:
 	/** Re-reads the mic list and reopens the right mic now. Same as Reconnect mic in the Tab menu. */
 	UFUNCTION(Exec)
 	void DinoMicRefresh();
+
+	/**
+	 * Checks this machine's voice, spectating and round state against the game's rules and
+	 * prints any failures (every result goes to the log). Also runs by itself after every phase
+	 * change, status change and join. See DinoSelfCheck.
+	 */
+	UFUNCTION(Exec)
+	void DinoSelfCheck();
 
 	/** Lists every AI creature with its awareness, target, and last known location. */
 	UFUNCTION(Exec)
@@ -260,6 +271,17 @@ private:
 
 	/** Server copy - see HearsLivingWhileSpectating. */
 	bool bSpectatorHearsLiving = true;
+
+	/**
+	 * Runs the self-check a few seconds after something changed: long enough for replication
+	 * to settle and for a death beat to end, so it judges the state the game meant to reach.
+	 * Each new trigger restarts the wait, so a burst of changes is checked once.
+	 */
+	void ScheduleSelfCheck(const FString& Trigger);
+	void RunScheduledSelfCheck();
+
+	FTimerHandle SelfCheckTimer;
+	FString PendingSelfCheckTrigger;
 
 	/** Local copy of the last value sent. */
 	TOptional<bool> SentSpectatorHearsLiving;

@@ -57,6 +57,12 @@ public:
 	float GetMicSensitivity() const;
 	void SetMicSensitivity(float Sensitivity);
 
+	/** The level speech must reach to be sent, for a sensitivity. Higher sensitivity, lower level. */
+	static float SensitivityToThreshold(float Sensitivity);
+
+	/** The inverse, clamped to 0-1, for showing an ini-set threshold on the slider. */
+	static float ThresholdToSensitivity(float Threshold);
+
 	/** Every mic Windows had when the game started - the only ones the engine can open. */
 	const TArray<FString>& GetSelectableMics() const { return StartupMics; }
 

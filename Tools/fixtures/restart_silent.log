@@ -1,0 +1,7 @@
+﻿Log file open, 10/18/26 20:34:52
+[2026.10.19-01.34.55:213][  0]LogDinoGame: Build version: 9d9267d-dirty
+[2026.10.19-01.36.23:380][162]LogGameState: Match State Changed from WaitingToStart to InProgress
+[2026.10.19-01.36.28:400][300]LogDinoGame: DinoSelfCheck[match InProgress]: 8 passed, 0 failed, 0 skipped - host as Snowak, match InProgress.
+[2026.10.19-01.38.15:875][961]LogWorld: SeamlessTravel to: /Game/FirstPerson/Forest
+[2026.10.19-01.38.16:002][965]LogDinoNet: Voice: released 0 remote speaker component(s) before Forest was destroyed.
+[2026.10.19-01.42.24:562][599]Log file closed, 10/18/26 20:42:24

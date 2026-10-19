@@ -115,6 +115,59 @@ void UDinoVoiceTalker::OnTalkingBegin(UAudioComponent* AudioComponent)
 
 	CurrentAudio = AudioComponent;
 	ApplyLocalVolume();
+
+	// Called by the engine right after it applied this talker's settings to the new sound, so
+	// this is the moment to see whether they took.
+	FString Detail;
+	const bool bMatches = CheckPlayback(Detail);
+	const FString Who = OwningPlayer.IsValid() ? OwningPlayer->GetPlayerName() : TEXT("?");
+	if (bMatches)
+	{
+		UE_LOG(LogDinoNet, Log, TEXT("Voice: %s started talking, %s."), *Who, *Detail);
+	}
+	else
+	{
+		UE_LOG(LogDinoNet, Warning, TEXT("Voice: %s started talking, but the sound does NOT match its settings: %s."), *Who, *Detail);
+	}
+}
+
+bool UDinoVoiceTalker::CheckPlayback(FString& OutDetail) const
+{
+	const UAudioComponent* Audio = CurrentAudio.Get();
+	if (!Audio)
+	{
+		OutDetail = TEXT("not playing");
+		return true;
+	}
+
+	// ApplyVoiceSettings attaches the synth's inner audio component and puts the attenuation on
+	// the synth itself; read both back from where it put them.
+	const UVoipListenerSynthComponent* Synth = Cast<UVoipListenerSynthComponent>(Audio->GetOuter());
+	const USceneComponent* Parent = Audio->GetAttachParent();
+	const USoundAttenuation* Attenuation = Synth ? Synth->AttenuationSettings.Get() : nullptr;
+
+	// Unpositioned, the sound hangs off its own synth: the synth attaches its inner component to
+	// itself when it creates it (USynthComponent::CreateAudioComponent), and ApplyVoiceSettings
+	// only re-attaches when there is a body to attach to. That, with no attenuation, plays
+	// unpositioned at full volume - the intent.
+	const bool bOnOwnSynth = Parent == nullptr || Parent == Synth;
+
+	auto Describe = [](const USceneComponent* Component, bool bUnpositioned)
+	{
+		if (bUnpositioned)
+		{
+			return FString(TEXT("unpositioned"));
+		}
+		return FString::Printf(TEXT("attached to %s"), Component->GetOwner() ? *Component->GetOwner()->GetName() : *Component->GetName());
+	};
+
+	OutDetail = FString::Printf(TEXT("sound %s with attenuation %s; settings want %s with %s"),
+		*Describe(Parent, bOnOwnSynth), Attenuation ? *Attenuation->GetName() : TEXT("none"),
+		*Describe(Settings.ComponentToAttachTo, Settings.ComponentToAttachTo == nullptr),
+		Settings.AttenuationSettings ? *Settings.AttenuationSettings->GetName() : TEXT("none"));
+
+	const bool bPlacementMatches = Settings.ComponentToAttachTo ? Parent == Settings.ComponentToAttachTo : bOnOwnSynth;
+	return bPlacementMatches && Attenuation == Settings.AttenuationSettings;
 }
 
 void UDinoVoiceTalker::OnTalkingEnd()

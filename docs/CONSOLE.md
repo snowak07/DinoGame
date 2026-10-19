@@ -179,6 +179,12 @@ living never hear the dead during a round.
 | Command | |
 |---|---|
 | `DinoBuildVersion` | Show the build version on screen again. When two players disagree about behaviour, check this first |
+| `DinoSelfCheck` | Check this machine's voice, spectating and round state against the game's rules, and on the host also every creature's target and every pin. Failures on screen, every result in the log |
+
+`DinoSelfCheck` also runs by itself 5 seconds after every phase change, death and join, on every
+machine. If it finds a problem it says so in red: run `DinoSelfCheck` then to see what, and keep
+the log. The host checks more than a client (what the server sends to each player, and everyone's
+status). Some checks are skipped in Play In Editor, where they can't give a true answer.
 
 ---
 

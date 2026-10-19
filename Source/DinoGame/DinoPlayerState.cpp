@@ -6,6 +6,7 @@
 #include "DinoGameState.h"
 #include "Engine/World.h"
 #include "Net/UnrealNetwork.h"
+#include "Online/DinoVoiceRules.h"
 #include "Online/DinoVoiceTalker.h"
 
 ADinoPlayerState::ADinoPlayerState()
@@ -61,7 +62,7 @@ void ADinoPlayerState::RefreshVoicePlacement()
 	}
 
 	ADinoCharacter* Body = VoiceBody.Get();
-	const bool bFromBody = IsAlive() && IsValid(Body) && Body->IsAlive();
+	const bool bFromBody = DinoVoiceRules::ShouldBePositioned(IsAlive(), IsValid(Body) && Body->IsAlive());
 
 	VoiceTalker->SetPlacement(bFromBody ? Body->GetRootComponent() : nullptr,
 		bFromBody ? Body->GetVoiceAttenuation() : nullptr);

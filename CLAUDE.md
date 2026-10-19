@@ -291,6 +291,46 @@ restart. With it on, every mic switched off at each restart and stayed off.
 
 ---
 
+## Testing
+
+Three layers, each catching what the one before cannot. **Run `Tools/run_tests.py` after every
+code change, before calling it done; run `Tools/check_logs.py` after every test session.**
+`package.bat` runs the unit tests between the editor build and the cook, and refuses to package
+on a failure, so no playtest build ships with a known regression.
+
+| | What | Run |
+|---|---|---|
+| Unit tests | `Source/DinoGameTests` (editor-only module, never packaged): rules, voice registration, the host mute quirk, status, join codes | `python Tools/run_tests.py`: the checker's self-test, then the editor build, then the tests headless (~40 s). Needs the editor closed. Any error or ensure in the run fails it, even with every test passing |
+| Self-check | `DinoSelfCheck` (`Source/DinoGame/DinoSelfCheck.cpp`): live state on a real two-machine build against the rules. Voice registration, placement and the sound actually playing; mutes; views; and on the host also status, server mutes, creature targets and pins | Automatic after each phase change, death and join; or the console command |
+| Log checker | `Tools/check_logs.py`: crashes, ensures (with the game frame), self-check failures, unexplained disconnects, new warnings, build mismatch, crash-report folders, across both machines | `python Tools/check_logs.py [--backups N]`; `--self-test` checks the checker against `Tools/fixtures` |
+
+The log checker judges **only the newest build**; older logs are history, so a fixed bug stops
+failing the check once the fix has been played. It explains a disconnect from the other
+machine's log (the host left just before) and fails on one it cannot explain. It lists
+**coverage gaps**, risky paths the session never exercised, such as a restart while someone
+talked: not failures, but next session's test list. It fails when a round was played and no
+self-check ran, and when its own parsing missed a marker the raw text contains, the sign an
+engine update changed a log format. When that happens, add a real excerpt to `Tools/fixtures`.
+
+- **Every bug fix gets a unit test that fails without the fix**, checked by briefly reverting it.
+  A test that has never failed has not shown it can.
+- **Rules live once, in plain functions** (`DinoVoiceRules`), which the game applies, the
+  self-check compares the engine against, and the tests pin. A new rule follows the same shape,
+  so it can be unit tested without a world.
+- **Every change logs enough to prove it ran and what it decided**, at `Log` verbosity
+  (`Verbose` is invisible in packaged builds). The logs are read in full after a test, so
+  more detail is better than less; log changes rather than every tick.
+- The unit tests' world (`DinoTestWorld.h`) is bare: no game mode, no players, no net driver. Match
+  flow and replication need the PIE test tier, and packaged restarts the Gauntlet tier; both are
+  Notion backlog items.
+- The engine's voice talker lookup is process-wide: a test that registers a talker must remove it.
+- Self-check lines are `DinoSelfCheck[trigger]: PASS|FAIL|SKIP <check> | <detail>`. Check names
+  contain colons, so the checker splits on ` | `; keep it when adding a check.
+- A new self-check reuses the game's own rule (`DinoVoiceRules`, `IsAcceptableTarget`) rather
+  than restating it, so it can only disagree with the engine, never with the game.
+
+---
+
 ## Console commands
 
 **The full list, and how to open the console, is `docs/CONSOLE.md`.** It is the only list —

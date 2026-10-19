@@ -12,6 +12,7 @@
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Online/DinoSessionSubsystem.h"
+#include "Online/DinoVoiceRules.h"
 #include "Online/DinoVoiceSubsystem.h"
 #include "TimerManager.h"
 
@@ -104,9 +105,10 @@ void ADinoGameMode::RefreshVoiceRules()
 		return;
 	}
 
-	// Only a round separates the living from the dead. In the lobby nobody has a body, and at
-	// round over everyone is dead, so both are free talk.
+	// The rule itself is DinoVoiceRules::ShouldMute, shared with the self-check and the tests.
 	const bool bRoundRunning = IsMatchInProgress();
+	const UGameInstance* GameInstance = GetGameInstance();
+	const UDinoVoiceSubsystem* VoiceSettings = GameInstance ? GameInstance->GetSubsystem<UDinoVoiceSubsystem>() : nullptr;
 
 	FString Muted;
 	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
@@ -130,10 +132,7 @@ void ADinoGameMode::RefreshVoiceRules()
 				continue;
 			}
 
-			const bool bSpeakerAlive = Speaker->IsAlive();
-			const bool bMute = bRoundRunning
-				&& ((bListenerAlive && !bSpeakerAlive)
-					|| (!bListenerAlive && bSpeakerAlive && !bSpectatorHearsLiving));
+			const bool bMute = DinoVoiceRules::ShouldMute(bRoundRunning, bListenerAlive, Speaker->IsAlive(), bSpectatorHearsLiving);
 
 			if (bMute)
 			{
@@ -142,7 +141,9 @@ void ADinoGameMode::RefreshVoiceRules()
 			}
 			else
 			{
-				UnmuteForGameplay(Listener, Speaker->GetUniqueId());
+				// Only the host's own Tab-menu mutes are visible here; see UnmuteForGameplay.
+				const bool bHostMutedThem = Listener->IsLocalController() && VoiceSettings && VoiceSettings->IsPlayerMuted(Speaker->GetUniqueId());
+				UnmuteForGameplay(Listener, Speaker->GetUniqueId(), Listener->IsLocalController(), bHostMutedThem);
 			}
 		}
 	}
@@ -155,7 +156,7 @@ void ADinoGameMode::RefreshVoiceRules()
 	}
 }
 
-void ADinoGameMode::UnmuteForGameplay(APlayerController* Listener, const FUniqueNetIdRepl& SpeakerId) const
+void ADinoGameMode::UnmuteForGameplay(APlayerController* Listener, const FUniqueNetIdRepl& SpeakerId, bool bListenerIsHost, bool bListenerMutedThem)
 {
 	const FUniqueNetIdPtr Id = SpeakerId.GetUniqueNetId();
 	const EVoiceBlockReasons* Reasons = Id.IsValid() ? Listener->MuteList.VoicePacketFilterMap.Find(Id.ToSharedRef()) : nullptr;
@@ -169,14 +170,10 @@ void ADinoGameMode::UnmuteForGameplay(APlayerController* Listener, const FUnique
 	// host would stop hearing that player for the rest of the session. Remote clients keep the
 	// two halves on different machines and are unaffected. Skipped when the host muted that
 	// player themselves in the Tab menu, which is the same "Muted" reason, meant to stay.
-	if (bWasGameplayMuted && Listener->IsLocalController())
+	if (bWasGameplayMuted && bListenerIsHost && !bListenerMutedThem)
 	{
-		const UGameInstance* GameInstance = GetGameInstance();
-		const UDinoVoiceSubsystem* Voice = GameInstance ? GameInstance->GetSubsystem<UDinoVoiceSubsystem>() : nullptr;
-		if (!Voice || !Voice->IsPlayerMuted(SpeakerId))
-		{
-			Listener->ClientUnmutePlayer(SpeakerId);
-		}
+		UE_LOG(LogDinoNet, Log, TEXT("Voice: host unmute workaround applied for %s."), *SpeakerId.ToString());
+		Listener->ClientUnmutePlayer(SpeakerId);
 	}
 }
 

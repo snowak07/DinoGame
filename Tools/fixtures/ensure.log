@@ -1,0 +1,32 @@
+﻿Log file open, 10/18/26 19:34:25
+[2026.10.19-00.34.28:854][  0]LogDinoGame: Build version: ef1c703-dirty
+[2026.10.19-00.37.22:722][974]LogStats: FPlatformStackWalk::StackWalkAndDump -  0.226 s
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: === Handled ensure: ===
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: 
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: Ensure condition failed: IsInAudioThread()  [File:D:\build\++UE5\Sync\Engine\Source\Runtime\AudioMixer\Private\AudioMixerDevice.cpp] [Line: 1067] 
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: 
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: Stack: 
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: [Callstack] 0x00007ff60c1a9890 DinoGame.exe!Audio::FMixerSourceManager::Update() []
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: [Callstack] 0x00007ff60c17a162 DinoGame.exe!Audio::FMixerSourceManager::FlushCommandQueue() []
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: [Callstack] 0x00007ff60dcb3546 DinoGame.exe!UDinoVoiceCleanupSubsystem::ReleaseAllSpeakerAudio() [H:\Unreal\Projects\DinoGame\Source\DinoGame\Online\DinoVoiceCleanupSubsystem.cpp:63]
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: [Callstack] 0x00007ff60dcb31ea DinoGame.exe!UDinoVoiceCleanupSubsystem::HandleWorldCleanup() [H:\Unreal\Projects\DinoGame\Source\DinoGame\Online\DinoVoiceCleanupSubsystem.cpp:41]
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: [Callstack] 0x00007ff60dcb3141 DinoGame.exe!TBaseUObjectMethodDelegateInstance<0,UDinoVoiceCleanupSubsystem,void __cdecl(UWorld *,bool,bool),FDefaultDelegateUserPolicy>::ExecuteIfSafe() [H:\Unreal\UE_5.8\Engine\Source\Runtime\Core\Public\Delegates\DelegateInstancesImpl.h:625]
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: [Callstack] 0x00007ff60a5b3f2d DinoGame.exe!TMulticastDelegate<void __cdecl(UWorld * __ptr64,bool,bool),FDefaultDelegateUserPolicy>::Broadcast() []
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: [Callstack] 0x00007ff60a5b53df DinoGame.exe!UWorld::CleanupWorldInternal() []
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: [Callstack] 0x00007ff60a5b5228 DinoGame.exe!UWorld::CleanupWorld() []
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: [Callstack] 0x00007ff60a5ecb75 DinoGame.exe!FSeamlessTravelHandler::Tick() []
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: [Callstack] 0x00007ff60a74a816 DinoGame.exe!UEngine::TickWorldTravel() []
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: [Callstack] 0x00007ff609690353 DinoGame.exe!UGameEngine::Tick() []
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: [Callstack] 0x00007ff60d9b31ef DinoGame.exe!FEngineLoop::Tick() []
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: [Callstack] 0x00007ff60d9a326c DinoGame.exe!GuardedMain() []
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: [Callstack] 0x00007ff60d9a335a DinoGame.exe!GuardedMainWrapper() []
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: [Callstack] 0x00007ff60d9a6f40 DinoGame.exe!LaunchWindowsStartup() []
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: [Callstack] 0x00007ff60d9b5d34 DinoGame.exe!WinMain() []
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: [Callstack] 0x00007ff612ec738e DinoGame.exe!__scrt_common_main_seh() [D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_common.inl:288]
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: [Callstack] 0x00007ffaef67dda7 KERNEL32.DLL!UnknownFunction []
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: [Callstack] 0x00007ffaef7dee4c ntdll.dll!UnknownFunction []
+[2026.10.19-00.37.22:722][974]LogOutputDevice: Error: 
+[2026.10.19-00.37.22:724][974]LogStats:                SubmitErrorReport -  0.000 s
+[2026.10.19-00.37.22:952][974]LogWindows: Could not start crash report client using ../../../Engine/Binaries/Win64/CrashReportClient-Win64-Debug.exe
+[2026.10.19-00.37.22:952][974]LogMemory: Platform Memory Stats for Windows
+[2026.10.19-00.43.19:958][104]Log file closed, 10/18/26 19:43:19

@@ -109,6 +109,9 @@ public:
 
 	UDinoVoiceTalker* GetVoiceTalker() const { return VoiceTalker; }
 
+	/** The body this player's voice comes from on this machine, if any. */
+	ADinoCharacter* GetVoiceBody() const { return VoiceBody.Get(); }
+
 	/** Called by this player's character on every machine once it knows it belongs to them. */
 	void SetVoiceBody(ADinoCharacter* Body);
 

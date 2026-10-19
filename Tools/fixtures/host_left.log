@@ -1,0 +1,8 @@
+﻿Log file open, 10/18/26 20:34:52
+[2026.10.19-01.34.55:213][  0]LogDinoGame: Build version: 9d9267d-dirty
+[2026.10.19-01.35.03:826][ 41]LogDinoGame: DinoSelfCheck[match WaitingToStart]: PASS My view: spectator camera: status Lobby, controller spectating, camera exists
+[2026.10.19-01.35.03:826][ 41]LogDinoGame: DinoSelfCheck[match WaitingToStart]: PASS Lobby status: Snowak: status Lobby; everyone should be Lobby before a round
+[2026.10.19-01.35.03:826][ 41]LogDinoGame: DinoSelfCheck[match WaitingToStart]: PASS Push-to-talk off: bRequiresPushToTalk is off
+[2026.10.19-01.40.34:683][892]LogDinoNet: Left session GameSession (ok).
+[2026.10.19-01.38.15:875][961]LogGameMode: Display: Match State Changed from WaitingPostMatch to LeavingMap
+[2026.10.19-01.42.24:562][599]Log file closed, 10/18/26 20:42:24

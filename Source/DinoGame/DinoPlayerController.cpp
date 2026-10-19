@@ -9,6 +9,7 @@
 #include "DinoPlayerState.h"
 #include "Online/DinoVoiceSubsystem.h"
 #include "Online/DinoVoiceTalker.h"
+#include "DinoSelfCheck.h"
 #include "DinoSpectatorPawn.h"
 #include "GameFramework/GameMode.h"
 #include "Camera/PlayerCameraManager.h"
@@ -211,6 +212,11 @@ void ADinoPlayerController::CloseSessionMenu()
 
 void ADinoPlayerController::HandlePlayerStatusChanged(ADinoPlayerState* ChangedPlayer, EDinoPlayerStatus OldStatus, EDinoPlayerStatus NewStatus)
 {
+	if (IsLocalController())
+	{
+		ScheduleSelfCheck(TEXT("status change"));
+	}
+
 	const bool bDied = NewStatus == EDinoPlayerStatus::Dead
 		&& (OldStatus == EDinoPlayerStatus::Alive || OldStatus == EDinoPlayerStatus::Downed);
 
@@ -233,6 +239,52 @@ void ADinoPlayerController::HandlePlayerListChanged()
 	if (const UDinoVoiceSubsystem* VoiceSettings = GetGameInstance() ? GetGameInstance()->GetSubsystem<UDinoVoiceSubsystem>() : nullptr)
 	{
 		VoiceSettings->ReapplyMutes(this);
+	}
+
+	ScheduleSelfCheck(TEXT("player list change"));
+}
+
+void ADinoPlayerController::ScheduleSelfCheck(const FString& Trigger)
+{
+	if (!IsLocalController() || !GetWorld())
+	{
+		return;
+	}
+
+	PendingSelfCheckTrigger = Trigger;
+
+	// Past the death beat before spectating (3 s), plus time for replication to land.
+	static constexpr float SettleSeconds = 5.0f;
+	GetWorldTimerManager().SetTimer(SelfCheckTimer, this, &ADinoPlayerController::RunScheduledSelfCheck, SettleSeconds, false);
+}
+
+void ADinoPlayerController::RunScheduledSelfCheck()
+{
+	const TArray<DinoSelfCheck::FResult> Results = DinoSelfCheck::Run(this, PendingSelfCheckTrigger);
+	const int32 Failed = DinoSelfCheck::CountFailures(Results);
+	if (Failed > 0)
+	{
+		// Testers are told, so a broken state is reported the round it happens rather than
+		// rediscovered from the log afterwards.
+		DinoScreenError(FString::Printf(TEXT("Self-check: %d problem(s) after %s. Run DinoSelfCheck to see them; details are in the log."),
+			Failed, *PendingSelfCheckTrigger));
+	}
+}
+
+void ADinoPlayerController::DinoSelfCheck()
+{
+	const TArray<DinoSelfCheck::FResult> Results = DinoSelfCheck::Run(this, TEXT("manual"));
+	const int32 Failed = DinoSelfCheck::CountFailures(Results);
+
+	const float Duration = 30.0f;
+	DinoScreenLog(FString::Printf(TEXT("--- Self-check: %d checks, %d failed (full list in the log) ---"), Results.Num(), Failed),
+		Failed > 0 ? FColor::Red : FColor::Green, Duration);
+	for (const DinoSelfCheck::FResult& Result : Results)
+	{
+		if (Result.Outcome == DinoSelfCheck::FResult::EOutcome::Fail)
+		{
+			DinoScreenLog(FString::Printf(TEXT("  FAIL %s: %s"), *Result.Name, *Result.Detail), FColor::Red, Duration);
+		}
 	}
 }
 
@@ -297,6 +349,8 @@ void ADinoPlayerController::PollSessionUI()
 	if (CurrentState != LastSeenMatchState)
 	{
 		LastSeenMatchState = CurrentState;
+
+		ScheduleSelfCheck(FString::Printf(TEXT("match %s"), *CurrentState.ToString()));
 
 		if (CurrentState == MatchState::WaitingToStart || CurrentState == MatchState::WaitingPostMatch)
 		{

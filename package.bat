@@ -9,6 +9,9 @@ REM
 REM Close the Unreal editor and every running DinoGame.exe before running this.
 REM Both lock files this needs to overwrite.
 REM
+REM The unit tests run after the editor build and before the cook, and a failure stops
+REM the package: no playtest build ships with a known regression. Tools/run_tests.py.
+REM
 REM The editor target is built FIRST and separately, on purpose: cooking runs
 REM through UnrealEditor-DinoGame.dll, so a stale editor module cooks Blueprints
 REM against an out-of-date C++ layout. That mismatch does not fail the build - it
@@ -81,12 +84,20 @@ if not exist "%PROJDIR%\Build" mkdir "%PROJDIR%\Build"
 echo Build version: %GITVER%
 
 echo.
-echo === [1/3] Editor target (needed for a correct cook) ===
+echo === [1/4] Editor target (needed for a correct cook) ===
 call "%UE%\Engine\Build\BatchFiles\Build.bat" DinoGameEditor Win64 Development -Project="%PROJ%" -WaitMutex
 if errorlevel 1 goto :fail
 
 echo.
-echo === [2/3] Game target + cook + stage + package ===
+echo === [2/4] Unit tests ===
+python "%PROJDIR%\Tools\run_tests.py" --no-build
+if errorlevel 1 (
+    echo Unit tests failed: not packaging. Fix them, or run Tools\run_tests.py to see why.
+    goto :fail
+)
+
+echo.
+echo === [3/4] Game target + cook + stage + package ===
 call "%UE%\Engine\Build\BatchFiles\RunUAT.bat" BuildCookRun ^
     -project="%PROJ%" ^
     -noP4 ^
@@ -99,7 +110,7 @@ if errorlevel 1 goto :fail
 
 if "%DEPLOY%"=="1" (
     echo.
-    echo === [3/3] Deploying to the test PC ===
+    echo === [4/4] Deploying to the test PC ===
     call "%PROJDIR%\deploy.bat"
     if errorlevel 1 goto :fail
     exit /b 0
@@ -118,7 +129,7 @@ if "%PUBLISH%"=="0" (
 REM GITVER was computed before the build, so the version itch records is the same string
 REM compiled into the binary being uploaded.
 echo.
-echo === [3/3] Publishing to itch as %ITCH_TARGET%:%ITCH_CHANNEL% (version %GITVER%) ===
+echo === [4/4] Publishing to itch as %ITCH_TARGET%:%ITCH_CHANNEL% (version %GITVER%) ===
 butler push "%ARCHIVE%\Windows" %ITCH_TARGET%:%ITCH_CHANNEL% --userversion %GITVER%
 if errorlevel 1 goto :fail
 

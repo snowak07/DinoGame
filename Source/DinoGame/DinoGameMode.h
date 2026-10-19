@@ -83,6 +83,14 @@ public:
 	 */
 	void RefreshVoiceRules();
 
+	/**
+	 * GameplayUnmutePlayer, plus the listen-server host's missing unmute (see the definition).
+	 * bListenerIsHost: Listener is this machine's own player, whose mute list the server and
+	 * client halves share. bListenerMutedThem: they muted this speaker themselves in the Tab
+	 * menu, which must stay. Static and public so the unit tests can pin the engine quirk.
+	 */
+	static void UnmuteForGameplay(APlayerController* Listener, const FUniqueNetIdRepl& SpeakerId, bool bListenerIsHost, bool bListenerMutedThem);
+
 	/** Seconds from death to spectating. Also how long round over waits after the last death. */
 	float GetSpectateDelay() const { return SpectateDelay; }
 
@@ -129,8 +137,6 @@ private:
 	/** The last mute set logged, so the log shows each change once rather than every refresh. */
 	FString LastVoiceRules;
 
-	/** GameplayUnmutePlayer, plus the listen-server host's missing unmute. See the definition. */
-	void UnmuteForGameplay(APlayerController* Listener, const FUniqueNetIdRepl& SpeakerId) const;
 
 	/** Puts a player in the engine's spectating state; the client then spawns its spectator camera. */
 	void BeginSpectating(APlayerController* Player);

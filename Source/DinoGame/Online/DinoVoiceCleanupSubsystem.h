@@ -4,6 +4,7 @@
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "DinoVoiceCleanupSubsystem.generated.h"
 
+class FAudioDevice;
 class UVoipListenerSynthComponent;
 
 /**
@@ -48,6 +49,9 @@ public:
 
 private:
 	void HandleWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources);
+
+	/** Runs FlushAudioRenderingCommands on the audio thread and waits for it. See the definition. */
+	static void FlushAudioThread(FAudioDevice* AudioDevice);
 
 	/** Releases every speaker's audio registered in World, or in any world when World is null. */
 	int32 ReleaseAllSpeakerAudio(const UWorld* World);

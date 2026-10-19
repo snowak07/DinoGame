@@ -44,6 +44,18 @@ public:
 	bool IsEngineTalker() const;
 
 	/**
+	 * Whether the sound the engine is playing this voice through right now matches these
+	 * settings: attached to the right body (or none) and with the right attenuation. The real
+	 * output, not our bookkeeping - the engine applies settings only when a voice starts, and
+	 * that gap is where voices went global before. True, with "not playing", when silent.
+	 * Checked at every voice start (logged) and by DinoSelfCheck.
+	 */
+	bool CheckPlayback(FString& OutDetail) const;
+
+	/** The engine's sound for this voice while it plays, or null. */
+	UAudioComponent* GetCurrentAudio() const { return CurrentAudio.Get(); }
+
+	/**
 	 * Positions the voice at AttachTo with Attenuation (proximity and occlusion), or plays it
 	 * with no position at all when AttachTo is null. A no-op when nothing changed; otherwise the
 	 * voice is refreshed so the change is heard from the next word.

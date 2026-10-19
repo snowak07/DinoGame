@@ -1,0 +1,8 @@
+﻿Log file open, 10/18/26 20:34:49
+[2026.10.19-01.34.53:261][  0]LogDinoGame: Build version: 9d9267d-dirty
+[2026.10.19-01.35.23:242][429]LogDinoGame: DinoSelfCheck[match WaitingToStart]: PASS Voice registered: Snowak: engine plays their voice through our talker
+[2026.10.19-01.35.23:242][429]LogDinoGame: DinoSelfCheck[match WaitingToStart]: PASS Voice placement: Snowak: status Lobby, living body no; expected unpositioned, talker unpositioned
+[2026.10.19-01.40.41:153][999]LogNet: Error: UEngine::BroadcastNetworkFailure: FailureType = ConnectionLost, ErrorString = Your connection to the host has been lost., Driver = Name:GameNetDriver Def:GameNetDriver SteamSocketsNetDriver_2147482378
+[2026.10.19-01.40.41:154][999]LogNet: Warning: Network Failure: GameNetDriver[ConnectionLost]: Your connection to the host has been lost.
+[2026.10.19-01.40.41:154][999]LogNet: NetworkFailure: ConnectionLost, Error: 'Your connection to the host has been lost.'
+[2026.10.19-01.42.58:146][403]Log file closed, 10/18/26 20:42:58
