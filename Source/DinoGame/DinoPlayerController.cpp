@@ -4,7 +4,11 @@
 #include "DinoCharacter.h"
 #include "DinoGame.h"
 #include "DinoGameMode.h"
+#include "DinoDamageTypes.h"
 #include "DinoGameState.h"
+#include "DinoPlayerState.h"
+#include "Online/DinoVoiceSubsystem.h"
+#include "Online/DinoVoiceTalker.h"
 #include "DinoSpectatorPawn.h"
 #include "GameFramework/GameMode.h"
 #include "Camera/PlayerCameraManager.h"
@@ -40,6 +44,11 @@ void ADinoPlayerController::BeginPlay()
 		ShowBuildVersionOnScreen();
 
 		GetWorldTimerManager().SetTimer(SessionUITimer, this, &ADinoPlayerController::PollSessionUI, 0.25f, true);
+
+		if (UDinoVoiceSubsystem* VoiceSettings = GetGameInstance() ? GetGameInstance()->GetSubsystem<UDinoVoiceSubsystem>() : nullptr)
+		{
+			VoiceSettings->ShowStartupNotices();
+		}
 	}
 }
 
@@ -200,10 +209,74 @@ void ADinoPlayerController::CloseSessionMenu()
 	SetShowMouseCursor(false);
 }
 
+void ADinoPlayerController::HandlePlayerStatusChanged(ADinoPlayerState* ChangedPlayer, EDinoPlayerStatus OldStatus, EDinoPlayerStatus NewStatus)
+{
+	const bool bDied = NewStatus == EDinoPlayerStatus::Dead
+		&& (OldStatus == EDinoPlayerStatus::Alive || OldStatus == EDinoPlayerStatus::Downed);
+
+	if (!IsLocalController() || !bDied || !ChangedPlayer || ChangedPlayer == PlayerState)
+	{
+		return;
+	}
+
+	DinoScreenLog(FString::Printf(TEXT("%s %s."), *ChangedPlayer->GetPlayerName(),
+		*UDinoDamageType::DescribeDeath(ChangedPlayer->GetDeathCause())), FColor(220, 90, 70), 5.0f);
+}
+
+void ADinoPlayerController::HandlePlayerListChanged()
+{
+	if (!IsLocalController())
+	{
+		return;
+	}
+
+	if (const UDinoVoiceSubsystem* VoiceSettings = GetGameInstance() ? GetGameInstance()->GetSubsystem<UDinoVoiceSubsystem>() : nullptr)
+	{
+		VoiceSettings->ReapplyMutes(this);
+	}
+}
+
+void ADinoPlayerController::SetSpectatorHearsLiving(bool bHearsLiving)
+{
+	if (!IsLocalController() || (SentSpectatorHearsLiving.IsSet() && SentSpectatorHearsLiving.GetValue() == bHearsLiving))
+	{
+		return;
+	}
+
+	SentSpectatorHearsLiving = bHearsLiving;
+	ServerSetSpectatorHearsLiving(bHearsLiving);
+}
+
+void ADinoPlayerController::ServerSetSpectatorHearsLiving_Implementation(bool bHearsLiving)
+{
+	if (bSpectatorHearsLiving == bHearsLiving)
+	{
+		return;
+	}
+
+	bSpectatorHearsLiving = bHearsLiving;
+	if (ADinoGameMode* GameMode = GetWorld() ? GetWorld()->GetAuthGameMode<ADinoGameMode>() : nullptr)
+	{
+		GameMode->RefreshVoiceRules();
+	}
+}
+
+void ADinoPlayerController::PawnPendingDestroy(APawn* InPawn)
+{
+	if (IsInState(NAME_Spectating) && InPawn && InPawn == GetPawn())
+	{
+		UE_LOG(LogDinoNet, Log, TEXT("Spectating: old body %s destroyed; staying in the spectator camera."), *InPawn->GetName());
+		UnPossess();
+		return;
+	}
+
+	Super::PawnPendingDestroy(InPawn);
+}
+
 void ADinoPlayerController::PollSessionUI()
 {
 	const UWorld* World = GetWorld();
-	const ADinoGameState* DinoState = World ? World->GetGameState<ADinoGameState>() : nullptr;
+	ADinoGameState* DinoState = World ? World->GetGameState<ADinoGameState>() : nullptr;
 	if (bOnMainMenu || !DinoState)
 	{
 		return;
@@ -213,6 +286,11 @@ void ADinoPlayerController::PollSessionUI()
 	{
 		LastSeenGameState = DinoState;
 		LastSeenMatchState = NAME_None;
+
+		// A new map means a new game state, so the binding is made again each time.
+		DinoState->OnPlayerStatusChanged.AddUniqueDynamic(this, &ADinoPlayerController::HandlePlayerStatusChanged);
+		DinoState->OnPlayerListChanged.AddUniqueDynamic(this, &ADinoPlayerController::HandlePlayerListChanged);
+		HandlePlayerListChanged();
 	}
 
 	const FName CurrentState = DinoState->GetMatchState();
@@ -263,6 +341,10 @@ void ADinoPlayerController::BeginSpectatingState()
 		// mid-pin is exactly the case where the pairing is most fragile, and a counter left at
 		// one would freeze the spectator camera's fly controls for the rest of the session.
 		ResetIgnoreInputFlags();
+
+		// Logged because this step was invisible when joining players' cameras froze.
+		UE_LOG(LogDinoNet, Log, TEXT("Spectating: started, camera %s."),
+			GetSpectatorPawn() ? *GetSpectatorPawn()->GetName() : TEXT("NOT CREATED"));
 
 		// Dying pinned leaves the view held on the raptor; the spectator camera must not inherit it.
 		ReleaseViewConstraint();
@@ -751,6 +833,14 @@ void ADinoPlayerController::DinoHitDino(float Damage)
 		FColor(240, 150, 40), 8.0f);
 }
 
+void ADinoPlayerController::DinoMicRefresh()
+{
+	if (UDinoVoiceSubsystem* VoiceSettings = GetGameInstance() ? GetGameInstance()->GetSubsystem<UDinoVoiceSubsystem>() : nullptr)
+	{
+		VoiceSettings->RefreshMic();
+	}
+}
+
 void ADinoPlayerController::DinoVoiceStatus()
 {
 	bool bVoiceEnabled = false;
@@ -771,8 +861,19 @@ void ADinoPlayerController::DinoVoiceStatus()
 	}
 
 	DinoScreenLog(FString::Printf(TEXT("  local talkers   : %d"), Voice->GetNumLocalTalkers()), FColor::White, StatusDuration);
-	DinoScreenLog(FString::Printf(TEXT("  speaking now    : %s"), Voice->IsLocalPlayerTalking(0) ? TEXT("yes") : TEXT("no")), FColor::White, StatusDuration);
-	DinoScreenLog(FString::Printf(TEXT("  headset present : %s"), Voice->IsHeadsetPresent(0) ? TEXT("yes") : TEXT("no")), FColor::White, StatusDuration);
+
+	// The mic over the last few seconds rather than this instant: typing this command means not
+	// talking, so an instant reading always said "no". Speak, then run it.
+	const UDinoVoiceSubsystem* VoiceSettings = GetGameInstance() ? GetGameInstance()->GetSubsystem<UDinoVoiceSubsystem>() : nullptr;
+	if (VoiceSettings)
+	{
+		TArray<FString> MicLines;
+		VoiceSettings->DescribeMic(MicLines);
+		for (const FString& Line : MicLines)
+		{
+			DinoScreenLog(Line, FColor::White, StatusDuration);
+		}
+	}
 
 	// There is no remote-talker count on the interface, so walk the PlayerStates instead. This
 	// also distinguishes "peer is connected but silent" from "peer never registered", which a
@@ -790,18 +891,17 @@ void ADinoPlayerController::DinoVoiceStatus()
 
 			const FUniqueNetIdRepl& OtherId = Other->GetUniqueId();
 			const bool bTalking = OtherId.IsValid() && Voice->IsRemotePlayerTalking(*OtherId);
-			DinoScreenLog(FString::Printf(TEXT("    %-20s %s"), *Other->GetPlayerName(),
-				!OtherId.IsValid() ? TEXT("<no net id>") : (bTalking ? TEXT("talking") : TEXT("silent"))), FColor::White, StatusDuration);
+			const ADinoPlayerState* DinoOther = Cast<ADinoPlayerState>(Other);
+			const UDinoVoiceTalker* Talker = DinoOther ? DinoOther->GetVoiceTalker() : nullptr;
+			const bool bMutedByMe = VoiceSettings && VoiceSettings->IsPlayerMuted(OtherId);
+			// "NOT REGISTERED" means the engine plays their voice with none of our settings: at
+			// full volume, from anywhere, whatever "from their body" says.
+			DinoScreenLog(FString::Printf(TEXT("    %-20s %s, %s%s%s"), *Other->GetPlayerName(),
+				!OtherId.IsValid() ? TEXT("<no net id>") : (bTalking ? TEXT("talking") : TEXT("silent")),
+				Talker && Talker->IsPositioned() ? TEXT("from their body") : TEXT("unpositioned"),
+				Talker && Talker->IsEngineTalker() ? TEXT("") : TEXT(", NOT REGISTERED"),
+				bMutedByMe ? TEXT(", muted by you") : TEXT("")), FColor::White, StatusDuration);
 		}
-	}
-
-	if (const ADinoCharacter* DinoPawn = Cast<ADinoCharacter>(GetPawn()))
-	{
-		DinoScreenLog(FString::Printf(TEXT("  our voice level : %.3f"), DinoPawn->GetVoiceLevel()), FColor::White, StatusDuration);
-	}
-	else
-	{
-		DinoScreenLog(TEXT("  our voice level : <no DinoCharacter possessed>"), FColor::White, StatusDuration);
 	}
 
 	// The engine's own dump stays log-only: it is dozens of lines and would bury everything

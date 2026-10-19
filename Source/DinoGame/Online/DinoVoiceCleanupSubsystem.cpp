@@ -1,5 +1,6 @@
 #include "Online/DinoVoiceCleanupSubsystem.h"
 
+#include "AudioDevice.h"
 #include "Components/AudioComponent.h"
 #include "DinoGame.h"
 #include "Engine/World.h"
@@ -15,6 +16,14 @@ void UDinoVoiceCleanupSubsystem::Initialize(FSubsystemCollectionBase& Collection
 
 void UDinoVoiceCleanupSubsystem::Deinitialize()
 {
+	// Quitting tears the subsystems down before the last world is cleaned up, so the world
+	// cleanup handler never saw it and the engine's check tripped on every quit. Release here.
+	const int32 Released = ReleaseAllSpeakerAudio(nullptr);
+	if (Released > 0)
+	{
+		UE_LOG(LogDinoNet, Log, TEXT("Voice: released %d remote speaker component(s) on shutdown."), Released);
+	}
+
 	FWorldDelegates::OnWorldCleanup.Remove(WorldCleanupHandle);
 
 	Super::Deinitialize();
@@ -29,41 +38,67 @@ void UDinoVoiceCleanupSubsystem::HandleWorldCleanup(UWorld* World, bool /*bSessi
 		return;
 	}
 
-	int32 Removed = 0;
+	const int32 Released = ReleaseAllSpeakerAudio(World);
+	if (Released > 0)
+	{
+		UE_LOG(LogDinoNet, Log, TEXT("Voice: released %d remote speaker component(s) before %s was destroyed."),
+			Released, *World->GetName());
+	}
+}
+
+int32 UDinoVoiceCleanupSubsystem::ReleaseAllSpeakerAudio(const UWorld* World)
+{
+	TArray<UVoipListenerSynthComponent*> Voices;
 	for (TObjectIterator<UVoipListenerSynthComponent> It; It; ++It)
 	{
 		UVoipListenerSynthComponent* Voice = *It;
-		if (!IsValid(Voice) || Voice->GetWorld() != World)
+		if (IsValid(Voice) && (!World || Voice->GetWorld() == World))
 		{
-			continue;
+			Voices.Add(Voice);
 		}
-
-		// The same order as the engine's own FRemoteTalkerDataImpl::Reset: stop, then unregister
-		// the inner audio component, then the synth itself. Destroyed as well, so the voice
-		// system's weak pointer lets go and it builds a new one for the next packet.
-		Voice->Stop();
-
-		if (UAudioComponent* Audio = Voice->GetAudioComponent())
-		{
-			if (Audio->IsRegistered())
-			{
-				Audio->UnregisterComponent();
-			}
-			Audio->DestroyComponent();
-		}
-
-		if (Voice->IsRegistered())
-		{
-			Voice->UnregisterComponent();
-		}
-		Voice->DestroyComponent();
-
-		++Removed;
 	}
 
-	if (Removed > 0)
+	for (UVoipListenerSynthComponent* Voice : Voices)
 	{
-		UE_LOG(LogDinoNet, Log, TEXT("Voice: released %d remote speaker component(s) before %s was destroyed."),
-			Removed, *World->GetName());
+		ReleaseSpeakerAudio(Voice);
 	}
+
+	return Voices.Num();
+}
+
+void UDinoVoiceCleanupSubsystem::ReleaseSpeakerAudio(UVoipListenerSynthComponent* Voice)
+{
+	if (!IsValid(Voice))
+	{
+		return;
+	}
+
+	// Stop first, and let the audio thread catch up, so nothing is still queued to start on
+	// this sound when it is destroyed. See the header.
+	Voice->Stop();
+	if (const UWorld* World = Voice->GetWorld())
+	{
+		if (FAudioDevice* AudioDevice = World->GetAudioDeviceRaw())
+		{
+			AudioDevice->FlushAudioRenderingCommands();
+		}
+	}
+
+	// The same order as the engine's own FRemoteTalkerDataImpl::Reset: the inner audio
+	// component, then the synth itself. Destroyed as well, so the voice system's weak pointer
+	// lets go and it builds a new one for the next packet.
+	if (UAudioComponent* Audio = Voice->GetAudioComponent())
+	{
+		if (Audio->IsRegistered())
+		{
+			Audio->UnregisterComponent();
+		}
+		Audio->DestroyComponent();
+	}
+
+	if (Voice->IsRegistered())
+	{
+		Voice->UnregisterComponent();
+	}
+	Voice->DestroyComponent();
 }

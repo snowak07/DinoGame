@@ -2,6 +2,7 @@
 
 #include "AI/DinoCreature.h"
 #include "DinoCharacter.h"
+#include "DinoDamageTypes.h"
 #include "DinoGame.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/World.h"
@@ -172,4 +173,9 @@ void UDinoDevourAttackComponent::AppendSetupCheck(TArray<FString>& OutLines) con
 		GrabRange, GrabHalfAngle, GrabRange)));
 
 	OutLines.Add(CheckLine(true, TEXT("devour is unstoppable"), TEXT("staggers are refused while holding")));
+}
+
+TSubclassOf<UDamageType> UDinoDevourAttackComponent::GetDamageType() const
+{
+	return UDinoDamageType_Devour::StaticClass();
 }

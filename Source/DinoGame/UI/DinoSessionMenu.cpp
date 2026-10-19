@@ -3,7 +3,12 @@
 #include "Blueprint/WidgetTree.h"
 #include "Components/Border.h"
 #include "Components/Button.h"
+#include "Components/ComboBoxString.h"
+#include "Components/HorizontalBox.h"
+#include "Components/HorizontalBoxSlot.h"
 #include "Components/SizeBox.h"
+#include "Components/Slider.h"
+#include "Components/Spacer.h"
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
@@ -13,12 +18,18 @@
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
 #include "Online/DinoSessionSubsystem.h"
+#include "Online/DinoVoiceSubsystem.h"
 #include "TimerManager.h"
+#include "UI/DinoVoiceRow.h"
 
 namespace
 {
 	constexpr float RefreshInterval = 0.25f;
 	constexpr float ButtonWidth = 280.0f;
+	constexpr float VoiceColumnWidth = 520.0f;
+
+	/** The mic picker's first entry. Picking it follows whatever Windows calls the default input. */
+	const TCHAR* const WindowsDefaultMic = TEXT("Windows default");
 }
 
 // --- Layout ----------------------------------------------------------------------------------
@@ -46,8 +57,30 @@ void UDinoSessionMenu::BuildLayout()
 	Backdrop->SetVerticalAlignment(VAlign_Center);
 	WidgetTree->RootWidget = Backdrop;
 
+	// Session on the left, voice on the right.
+	UHorizontalBox* Columns = WidgetTree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass(), TEXT("Columns"));
+	Backdrop->SetContent(Columns);
+
 	UVerticalBox* Column = WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass(), TEXT("Column"));
-	Backdrop->SetContent(Column);
+	if (UHorizontalBoxSlot* ColumnSlot = Cast<UHorizontalBoxSlot>(Columns->AddChild(Column)))
+	{
+		ColumnSlot->SetVerticalAlignment(VAlign_Center);
+	}
+
+	USpacer* Gap = WidgetTree->ConstructWidget<USpacer>(USpacer::StaticClass());
+	Gap->SetSize(FVector2D(60.0f, 1.0f));
+	Columns->AddChild(Gap);
+
+	USizeBox* VoiceSize = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass(), TEXT("VoiceColumnSize"));
+	VoiceSize->SetWidthOverride(VoiceColumnWidth);
+	if (UHorizontalBoxSlot* VoiceSlot = Cast<UHorizontalBoxSlot>(Columns->AddChild(VoiceSize)))
+	{
+		VoiceSlot->SetVerticalAlignment(VAlign_Center);
+	}
+
+	UVerticalBox* VoiceColumn = WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass(), TEXT("VoiceColumn"));
+	VoiceSize->SetContent(VoiceColumn);
+	BuildVoiceColumn(VoiceColumn);
 
 	TitleText = AddText(Column, 34, FLinearColor::White);
 	InfoText = AddText(Column, 18, FLinearColor(0.85f, 0.85f, 0.85f));
@@ -64,6 +97,59 @@ void UDinoSessionMenu::BuildLayout()
 	LobbyButton->OnClicked.AddDynamic(this, &UDinoSessionMenu::HandleLobbyClicked);
 	ResumeButton->OnClicked.AddDynamic(this, &UDinoSessionMenu::HandleResumeClicked);
 	LeaveButton->OnClicked.AddDynamic(this, &UDinoSessionMenu::HandleLeaveClicked);
+}
+
+void UDinoSessionMenu::BuildVoiceColumn(UPanelWidget* Parent)
+{
+	UTextBlock* Header = AddText(Parent, 24, FLinearColor::White);
+	Header->SetText(FText::FromString(TEXT("Voice")));
+
+	VoiceRowBox = WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass(), TEXT("VoiceRows"));
+	if (UVerticalBoxSlot* RowsSlot = Cast<UVerticalBoxSlot>(Parent->AddChild(VoiceRowBox)))
+	{
+		RowsSlot->SetHorizontalAlignment(HAlign_Center);
+	}
+
+	NoOtherPlayersText = AddText(Parent, 14, FLinearColor(0.6f, 0.6f, 0.6f));
+	NoOtherPlayersText->SetText(FText::FromString(TEXT("Nobody else is here yet.")));
+
+	UTextBlock* MicHeader = AddText(Parent, 16, FLinearColor(0.85f, 0.85f, 0.85f));
+	MicHeader->SetText(FText::FromString(TEXT("Microphone")));
+
+	USizeBox* PickerSize = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass());
+	PickerSize->SetWidthOverride(ButtonWidth + 80.0f);
+	MicPicker = WidgetTree->ConstructWidget<UComboBoxString>(UComboBoxString::StaticClass(), TEXT("MicPicker"));
+	PickerSize->SetContent(MicPicker);
+	if (UVerticalBoxSlot* PickerSlot = Cast<UVerticalBoxSlot>(Parent->AddChild(PickerSize)))
+	{
+		PickerSlot->SetHorizontalAlignment(HAlign_Center);
+		PickerSlot->SetPadding(FMargin(0.0f, 4.0f));
+	}
+	MicPicker->OnSelectionChanged.AddDynamic(this, &UDinoSessionMenu::HandleMicPicked);
+
+	UTextBlock* SensitivityHeader = AddText(Parent, 14, FLinearColor(0.85f, 0.85f, 0.85f));
+	SensitivityHeader->SetText(FText::FromString(TEXT("Mic sensitivity  (quiet mic or cut-off words: raise it)")));
+
+	USizeBox* SliderSize = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass());
+	SliderSize->SetWidthOverride(ButtonWidth + 80.0f);
+	SensitivitySlider = WidgetTree->ConstructWidget<USlider>(USlider::StaticClass(), TEXT("MicSensitivity"));
+	SensitivitySlider->SetMinValue(0.0f);
+	SensitivitySlider->SetMaxValue(1.0f);
+	SensitivitySlider->SetStepSize(0.02f);
+	SliderSize->SetContent(SensitivitySlider);
+	if (UVerticalBoxSlot* SliderSlot = Cast<UVerticalBoxSlot>(Parent->AddChild(SliderSize)))
+	{
+		SliderSlot->SetHorizontalAlignment(HAlign_Center);
+		SliderSlot->SetPadding(FMargin(0.0f, 4.0f));
+	}
+	SensitivitySlider->OnValueChanged.AddDynamic(this, &UDinoSessionMenu::HandleSensitivityChanged);
+
+	MicLevelText = AddText(Parent, 14, FLinearColor(0.7f, 0.7f, 0.7f));
+	MicNoticeText = AddText(Parent, 14, FLinearColor(0.95f, 0.7f, 0.3f));
+	MicNoticeText->SetAutoWrapText(true);
+
+	ReconnectMicButton = AddButton(Parent, TEXT("Reconnect mic"));
+	ReconnectMicButton->OnClicked.AddDynamic(this, &UDinoSessionMenu::HandleReconnectMicClicked);
 }
 
 UTextBlock* UDinoSessionMenu::AddText(UPanelWidget* Parent, int32 FontSize, const FLinearColor& Colour)
@@ -120,6 +206,13 @@ void UDinoSessionMenu::NativeConstruct()
 
 	// Without this the widget never receives key events, so Escape and Tab would do nothing.
 	SetIsFocusable(true);
+
+	FillMicPicker();
+	if (const UDinoVoiceSubsystem* Voice = GetVoiceSubsystem())
+	{
+		// Set here rather than every refresh, which would fight a slider being dragged.
+		SensitivitySlider->SetValue(Voice->GetMicSensitivity());
+	}
 
 	Refresh();
 
@@ -185,6 +278,8 @@ FReply UDinoSessionMenu::NativeOnKeyDown(const FGeometry& InGeometry, const FKey
 
 void UDinoSessionMenu::Refresh()
 {
+	RefreshVoice();
+
 	const UWorld* World = GetWorld();
 	const ADinoGameState* DinoState = World ? World->GetGameState<ADinoGameState>() : nullptr;
 	const bool bHost = IsHost();
@@ -251,9 +346,19 @@ void UDinoSessionMenu::Refresh()
 			continue;
 		}
 
-		// "out" rather than "dead": a player who joined mid-round is not alive either, and has
-		// not died. Both are simply out of this round.
-		const TCHAR* Status = bLobby ? TEXT("") : (DinoPlayer->IsAlive() ? TEXT("  - alive") : TEXT("  - out"));
+		// From the player status, so this list can never disagree with spectating or the round
+		// end. Lobby during a round is someone who joined after it started: watching, not dead.
+		const TCHAR* Status = TEXT("");
+		if (!bLobby)
+		{
+			switch (DinoPlayer->GetStatus())
+			{
+			case EDinoPlayerStatus::Alive:  Status = TEXT("  - alive"); break;
+			case EDinoPlayerStatus::Downed: Status = TEXT("  - downed"); break;
+			case EDinoPlayerStatus::Dead:   Status = TEXT("  - dead"); break;
+			default:                        Status = TEXT("  - spectating"); break;
+			}
+		}
 		Players += FString::Printf(TEXT("%s%s%s\n"),
 			*DinoPlayer->GetPlayerName(), DinoPlayer->IsHost() ? TEXT(" (host)") : TEXT(""), Status);
 	}
@@ -267,6 +372,144 @@ void UDinoSessionMenu::Refresh()
 	Show(LobbyButton, bHost && (bRound || bOver));
 	Show(ResumeButton, true);
 	Show(LeaveButton, true);
+}
+
+void UDinoSessionMenu::FillMicPicker()
+{
+	const UDinoVoiceSubsystem* Voice = GetVoiceSubsystem();
+	if (!Voice || !MicPicker)
+	{
+		return;
+	}
+
+	if (MicPicker->GetOptionCount() == 0)
+	{
+		MicPicker->AddOption(WindowsDefaultMic);
+		for (const FString& Mic : Voice->GetSelectableMics())
+		{
+			MicPicker->AddOption(Mic);
+		}
+	}
+
+	const FString Wanted = Voice->GetPickedMic().IsEmpty() ? FString(WindowsDefaultMic) : Voice->GetPickedMic();
+	if (MicPicker->GetSelectedOption() != Wanted)
+	{
+		MicPicker->SetSelectedOption(Wanted);
+	}
+}
+
+void UDinoSessionMenu::RefreshVoice()
+{
+	UDinoVoiceSubsystem* Voice = GetVoiceSubsystem();
+	const UWorld* World = GetWorld();
+	const AGameStateBase* GameState = World ? World->GetGameState() : nullptr;
+	const APlayerController* PC = GetOwningPlayer();
+	if (!Voice || !VoiceRowBox)
+	{
+		return;
+	}
+
+	TArray<ADinoPlayerState*> Others;
+	if (GameState)
+	{
+		for (APlayerState* State : GameState->PlayerArray)
+		{
+			ADinoPlayerState* DinoPlayer = Cast<ADinoPlayerState>(State);
+			if (DinoPlayer && (!PC || DinoPlayer != PC->PlayerState))
+			{
+				Others.Add(DinoPlayer);
+			}
+		}
+	}
+
+	bool bSamePlayers = Others.Num() == VoiceRows.Num();
+	for (int32 Index = 0; bSamePlayers && Index < Others.Num(); ++Index)
+	{
+		bSamePlayers = VoiceRows[Index] && VoiceRows[Index]->GetPlayer() == Others[Index];
+	}
+
+	if (!bSamePlayers)
+	{
+		VoiceRowBox->ClearChildren();
+		VoiceRows.Reset();
+		for (ADinoPlayerState* Other : Others)
+		{
+			UDinoVoiceRow* Row = CreateWidget<UDinoVoiceRow>(GetOwningPlayer(), UDinoVoiceRow::StaticClass());
+			if (Row)
+			{
+				VoiceRowBox->AddChild(Row);
+				Row->SetPlayer(Other);
+				VoiceRows.Add(Row);
+			}
+		}
+	}
+	else
+	{
+		for (UDinoVoiceRow* Row : VoiceRows)
+		{
+			Row->Refresh();
+		}
+	}
+
+	NoOtherPlayersText->SetVisibility(Others.IsEmpty() ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+
+	// The level is the loudest of the last few seconds, so a word just spoken stays readable.
+	const float Peak = Voice->GetRecentMicPeak();
+	const float Threshold = Voice->GetMicThreshold();
+	const bool bHeard = Peak > 0.0f && Peak >= Threshold;
+	FString Level;
+	if (Voice->GetActiveMic().IsEmpty())
+	{
+		Level = TEXT("Voice starts once you host or join.");
+	}
+	else
+	{
+		Level = FString::Printf(TEXT("Using %s\nLevel %.3f  -  sent above %.3f  -  %s"),
+			*Voice->GetActiveMic(), Peak, Threshold,
+			bHeard ? TEXT("others hear you") : TEXT("too quiet to send"));
+	}
+	MicLevelText->SetText(FText::FromString(Level));
+	MicLevelText->SetColorAndOpacity(FSlateColor(bHeard ? FLinearColor(0.5f, 0.9f, 0.5f) : FLinearColor(0.7f, 0.7f, 0.7f)));
+
+	const FString Notice = Voice->GetMicNotice();
+	MicNoticeText->SetText(FText::FromString(Notice));
+	MicNoticeText->SetVisibility(Notice.IsEmpty() ? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible);
+}
+
+void UDinoSessionMenu::HandleMicPicked(FString SelectedItem, ESelectInfo::Type SelectionType)
+{
+	// Direct is FillMicPicker showing the saved choice, not the player picking.
+	if (SelectionType == ESelectInfo::Direct)
+	{
+		return;
+	}
+
+	if (UDinoVoiceSubsystem* Voice = GetVoiceSubsystem())
+	{
+		Voice->PickMic(SelectedItem == WindowsDefaultMic ? FString() : SelectedItem);
+	}
+}
+
+void UDinoSessionMenu::HandleSensitivityChanged(float Value)
+{
+	if (UDinoVoiceSubsystem* Voice = GetVoiceSubsystem())
+	{
+		Voice->SetMicSensitivity(Value);
+	}
+}
+
+void UDinoSessionMenu::HandleReconnectMicClicked()
+{
+	if (UDinoVoiceSubsystem* Voice = GetVoiceSubsystem())
+	{
+		Voice->RefreshMic();
+	}
+}
+
+UDinoVoiceSubsystem* UDinoSessionMenu::GetVoiceSubsystem() const
+{
+	const UGameInstance* GameInstance = GetGameInstance();
+	return GameInstance ? GameInstance->GetSubsystem<UDinoVoiceSubsystem>() : nullptr;
 }
 
 // --- Buttons ---------------------------------------------------------------------------------

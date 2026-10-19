@@ -4,6 +4,8 @@
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "DinoVoiceCleanupSubsystem.generated.h"
 
+class UVoipListenerSynthComponent;
+
 /**
  * Engine workaround: tears down voice chat's per-speaker audio before a world is destroyed.
  *
@@ -22,6 +24,7 @@
  * destroy every such component in the world being cleaned up, the same steps the engine's own
  * reset takes. The voice system only holds them by weak pointer, so the next packet from that
  * speaker builds a fresh one in the new world, and the engine's late reset finds nothing to do.
+ * The same release runs once more on shutdown, which otherwise left one behind on every quit.
  */
 UCLASS()
 class DINOGAME_API UDinoVoiceCleanupSubsystem : public UGameInstanceSubsystem
@@ -32,8 +35,22 @@ public:
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
 
+	/**
+	 * Stops, unregisters and destroys one remote speaker's sound player, so the voice system
+	 * builds a fresh one - with that speaker's current voice settings - on their next word.
+	 *
+	 * The audio is stopped and the audio thread caught up *before* the component is destroyed.
+	 * Destroying it while a start was still queued on the audio thread tripped the engine's
+	 * "OwningSynthComponent.IsValid()" check on every restart: harmless, but a hitch and a
+	 * crash-report folder each time.
+	 */
+	static void ReleaseSpeakerAudio(UVoipListenerSynthComponent* Voice);
+
 private:
 	void HandleWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources);
+
+	/** Releases every speaker's audio registered in World, or in any world when World is null. */
+	int32 ReleaseAllSpeakerAudio(const UWorld* World);
 
 	FDelegateHandle WorldCleanupHandle;
 };

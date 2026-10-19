@@ -1,6 +1,7 @@
 ﻿#include "DinoGameMode.h"
 
 #include "DinoCharacter.h"
+#include "DinoDamageTypes.h"
 #include "DinoGame.h"
 #include "DinoGameState.h"
 #include "DinoPlayerController.h"
@@ -11,6 +12,7 @@
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Online/DinoSessionSubsystem.h"
+#include "Online/DinoVoiceSubsystem.h"
 #include "TimerManager.h"
 
 namespace
@@ -67,6 +69,115 @@ void ADinoGameMode::InitGameState()
 	{
 		DinoState->SetJoinCode(Sessions->GetCurrentJoinCode());
 	}
+
+	// The game state is new on every map, so these are bound again on every map.
+	if (DinoState)
+	{
+		DinoState->OnPlayerStatusChanged.AddUniqueDynamic(this, &ADinoGameMode::HandlePlayerStatusChanged);
+		DinoState->OnPlayerListChanged.AddUniqueDynamic(this, &ADinoGameMode::HandlePlayerListChanged);
+	}
+}
+
+// --- Voice rules -----------------------------------------------------------------------------
+
+void ADinoGameMode::OnMatchStateSet()
+{
+	Super::OnMatchStateSet();
+	RefreshVoiceRules();
+}
+
+void ADinoGameMode::HandlePlayerStatusChanged(ADinoPlayerState* /*ChangedPlayer*/, EDinoPlayerStatus /*OldStatus*/, EDinoPlayerStatus /*NewStatus*/)
+{
+	RefreshVoiceRules();
+}
+
+void ADinoGameMode::HandlePlayerListChanged()
+{
+	RefreshVoiceRules();
+}
+
+void ADinoGameMode::RefreshVoiceRules()
+{
+	UWorld* World = GetWorld();
+	if (!World || !GameState)
+	{
+		return;
+	}
+
+	// Only a round separates the living from the dead. In the lobby nobody has a body, and at
+	// round over everyone is dead, so both are free talk.
+	const bool bRoundRunning = IsMatchInProgress();
+
+	FString Muted;
+	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+	{
+		APlayerController* Listener = It->Get();
+		const ADinoPlayerState* ListenerState = Listener ? Listener->GetPlayerState<ADinoPlayerState>() : nullptr;
+		if (!ListenerState)
+		{
+			continue;
+		}
+
+		const ADinoPlayerController* DinoListener = Cast<ADinoPlayerController>(Listener);
+		const bool bListenerAlive = ListenerState->IsAlive();
+		const bool bSpectatorHearsLiving = !DinoListener || DinoListener->HearsLivingWhileSpectating();
+
+		for (APlayerState* Other : GameState->PlayerArray)
+		{
+			const ADinoPlayerState* Speaker = Cast<ADinoPlayerState>(Other);
+			if (!Speaker || Speaker == ListenerState || !Speaker->GetUniqueId().IsValid())
+			{
+				continue;
+			}
+
+			const bool bSpeakerAlive = Speaker->IsAlive();
+			const bool bMute = bRoundRunning
+				&& ((bListenerAlive && !bSpeakerAlive)
+					|| (!bListenerAlive && bSpeakerAlive && !bSpectatorHearsLiving));
+
+			if (bMute)
+			{
+				Listener->GameplayMutePlayer(Speaker->GetUniqueId());
+				Muted += FString::Printf(TEXT(" %s-x->%s"), *Speaker->GetPlayerName(), *ListenerState->GetPlayerName());
+			}
+			else
+			{
+				UnmuteForGameplay(Listener, Speaker->GetUniqueId());
+			}
+		}
+	}
+
+	if (Muted != LastVoiceRules)
+	{
+		LastVoiceRules = Muted;
+		UE_LOG(LogDinoNet, Log, TEXT("Voice rules: %s"),
+			Muted.IsEmpty() ? TEXT("everyone hears everyone") : *FString::Printf(TEXT("muted (speaker -x-> listener):%s"), *Muted));
+	}
+}
+
+void ADinoGameMode::UnmuteForGameplay(APlayerController* Listener, const FUniqueNetIdRepl& SpeakerId) const
+{
+	const FUniqueNetIdPtr Id = SpeakerId.GetUniqueNetId();
+	const EVoiceBlockReasons* Reasons = Id.IsValid() ? Listener->MuteList.VoicePacketFilterMap.Find(Id.ToSharedRef()) : nullptr;
+	const bool bWasGameplayMuted = Reasons && EnumHasAnyFlags(*Reasons, EVoiceBlockReasons::Gameplay);
+
+	Listener->GameplayUnmutePlayer(SpeakerId);
+
+	// The host's own controller is both the server's and the client's copy, and they share one
+	// mute list. The gameplay mute's ClientMutePlayer then adds a second, "Muted" reason to that
+	// same list, so the gameplay unmute above still sees a reason left and never unmutes: the
+	// host would stop hearing that player for the rest of the session. Remote clients keep the
+	// two halves on different machines and are unaffected. Skipped when the host muted that
+	// player themselves in the Tab menu, which is the same "Muted" reason, meant to stay.
+	if (bWasGameplayMuted && Listener->IsLocalController())
+	{
+		const UGameInstance* GameInstance = GetGameInstance();
+		const UDinoVoiceSubsystem* Voice = GameInstance ? GameInstance->GetSubsystem<UDinoVoiceSubsystem>() : nullptr;
+		if (!Voice || !Voice->IsPlayerMuted(SpeakerId))
+		{
+			Listener->ClientUnmutePlayer(SpeakerId);
+		}
+	}
 }
 
 void ADinoGameMode::PostLogin(APlayerController* NewPlayer)
@@ -99,7 +210,7 @@ void ADinoGameMode::HandleStartingNewPlayer_Implementation(APlayerController* Ne
 	{
 		// On a listen server the host's controller is the only one that is local to the server.
 		DinoState->SetIsHost(NewPlayer->IsLocalController());
-		DinoState->SetIsAlive(false);
+		DinoState->SetStatus(EDinoPlayerStatus::Lobby);
 	}
 
 	// Spawns nobody here, thanks to PlayerCanRestart; may start the match if ReadyToStartMatch,
@@ -128,7 +239,7 @@ void ADinoGameMode::RestartPlayer(AController* NewPlayer)
 	{
 		if (ADinoPlayerState* DinoState = NewPlayer->GetPlayerState<ADinoPlayerState>())
 		{
-			DinoState->SetIsAlive(true);
+			DinoState->SetStatus(EDinoPlayerStatus::Alive);
 		}
 	}
 }
@@ -140,28 +251,47 @@ void ADinoGameMode::BeginSpectating(APlayerController* Player)
 		return;
 	}
 
-	APawn* Body = Player->GetPawn();
-
 	// The engine's spectating state unpossesses the body on the server and spawns SpectatorClass
 	// on the owning client only. Both halves are needed: ChangeState alone leaves the client
 	// believing it is still playing, with no camera.
+	//
+	// The dead body is deliberately left in the world - hidden, with no collision, since death -
+	// until the map reloads. Deleting it here froze joining players' spectator cameras: on their
+	// machine the deletion could arrive while the controller still held the body, and Unreal's
+	// answer to "my pawn was destroyed" (AController::PawnPendingDestroy) is to switch the
+	// controller to Inactive, which destroys the spectator camera just created. It also keeps the
+	// way open for a visible death marker.
 	Player->ChangeState(NAME_Spectating);
 	Player->ClientGotoState(NAME_Spectating);
-
-	// A dead player's body has been hidden since the moment of death, kept only because its
-	// owner was still looking through it. Nobody is now, so it goes.
-	if (const ADinoCharacter* DeadBody = Cast<ADinoCharacter>(Body))
-	{
-		if (!DeadBody->IsAlive())
-		{
-			Body->Destroy();
-		}
-	}
 }
 
-void ADinoGameMode::NotifyPlayerDied(AController* Victim)
+void ADinoGameMode::KillPlayer(AController* Victim, TSubclassOf<UDamageType> Cause)
 {
+	ADinoPlayerState* VictimState = Victim ? Victim->GetPlayerState<ADinoPlayerState>() : nullptr;
+
+	// Once only. The body's own death calls back in here (step 2 below, and lethal damage), and a
+	// player in the lobby or already dead has nothing left to lose.
+	if (!VictimState || !VictimState->IsAlive())
+	{
+		return;
+	}
+
+	// 1. Status first, so the round-end check and every listener already see them as dead.
+	VictimState->SetStatus(EDinoPlayerStatus::Dead, Cause);
+
+	// 2. The body. A no-op when lethal damage got here first; the only route for a fall.
+	if (ADinoCharacter* Body = Cast<ADinoCharacter>(Victim->GetPawn()))
+	{
+		Body->Die(Cause);
+	}
+
+	// 3. Round over waits SpectateDelay from this moment (ReadyToEndMatch); spectating starts
+	// after the same delay, on the timer at the end.
 	LastDeathTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
+
+	// 4. One line per death, on the host, with what did it.
+	UE_LOG(LogDinoNet, Log, TEXT("%s %s (%s)."), *VictimState->GetPlayerName(),
+		*UDinoDamageType::DescribeDeath(Cause), *UDinoDamageType::NameOf(Cause));
 
 	APlayerController* Player = Cast<APlayerController>(Victim);
 	if (!Player)

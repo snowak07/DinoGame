@@ -2,7 +2,10 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/GameState.h"
+#include "DinoPlayerState.h"
 #include "DinoGameState.generated.h"
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FDinoPlayerListChanged);
 
 /**
  * Replicated round state, read by every machine's UI.
@@ -25,7 +28,30 @@ class DINOGAME_API ADinoGameState : public AGameState
 public:
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
-	/** Players with a living character this round. Zero in the lobby by definition. */
+	// --- Player status relay ---------------------------------------------------------------
+	// One place to listen for every player's status, on every machine. Bind once per map: the
+	// game state is replaced on every map load, seamless restarts included.
+	//
+	// The rule that keeps listeners correct: rebuild from the current statuses (loop PlayerArray
+	// and read GetStatus) rather than applying the single change each event describes. Bind
+	// both events, and do one rebuild straight after binding - a listener that binds late, or a
+	// player who joins late, never sees the changes that came before.
+
+	/** A player's status changed. Every machine, server included. */
+	UPROPERTY(BlueprintAssignable, Category = "Dino|Player")
+	FDinoPlayerStatusChanged OnPlayerStatusChanged;
+
+	/** A player joined or left PlayerArray. Every machine. */
+	UPROPERTY(BlueprintAssignable, Category = "Dino|Player")
+	FDinoPlayerListChanged OnPlayerListChanged;
+
+	/** Called by ADinoPlayerState whenever its status changes. Not for anything else. */
+	void NotifyPlayerStatusChanged(ADinoPlayerState* Player, EDinoPlayerStatus OldStatus, EDinoPlayerStatus NewStatus);
+
+	virtual void AddPlayerState(APlayerState* PlayerState) override;
+	virtual void RemovePlayerState(APlayerState* PlayerState) override;
+
+	/** Players still in the round - Alive or Downed. Zero in the lobby by definition. */
 	UFUNCTION(BlueprintPure, Category = "Dino|Multiplayer")
 	int32 GetAlivePlayerCount() const;
 

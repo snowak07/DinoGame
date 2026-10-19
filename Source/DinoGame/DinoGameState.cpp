@@ -24,6 +24,34 @@ int32 ADinoGameState::GetAlivePlayerCount() const
 	return Count;
 }
 
+void ADinoGameState::NotifyPlayerStatusChanged(ADinoPlayerState* Player, EDinoPlayerStatus OldStatus, EDinoPlayerStatus NewStatus)
+{
+	OnPlayerStatusChanged.Broadcast(Player, OldStatus, NewStatus);
+}
+
+void ADinoGameState::AddPlayerState(APlayerState* PlayerState)
+{
+	const int32 Before = PlayerArray.Num();
+	Super::AddPlayerState(PlayerState);
+
+	// Super ignores inactive (disconnected, kept for reconnect) PlayerStates and duplicates.
+	if (PlayerArray.Num() != Before)
+	{
+		OnPlayerListChanged.Broadcast();
+	}
+}
+
+void ADinoGameState::RemovePlayerState(APlayerState* PlayerState)
+{
+	const int32 Before = PlayerArray.Num();
+	Super::RemovePlayerState(PlayerState);
+
+	if (PlayerArray.Num() != Before)
+	{
+		OnPlayerListChanged.Broadcast();
+	}
+}
+
 bool ADinoGameState::IsInLobby() const
 {
 	return GetMatchState() == MatchState::WaitingToStart;

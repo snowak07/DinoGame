@@ -6,8 +6,12 @@
 
 class ADinoPlayerController;
 class UButton;
+class UComboBoxString;
+class UDinoVoiceRow;
 class UPanelWidget;
+class USlider;
 class UTextBlock;
+class UVerticalBox;
 
 /**
  * The in-session menu, on Tab: the lobby, a mid-round menu, and the round-over screen.
@@ -21,6 +25,9 @@ class UTextBlock;
  * keep in step. It looks plain on purpose. When a designed layout is wanted, the same handlers
  * can be driven from BindWidget members on a Blueprint child, as UDinoJoinMenu does, without the
  * behaviour here changing.
+ *
+ * The right-hand column is voice: a row per other player (mute, volume), the mic picker, mic
+ * sensitivity with a live level, and Reconnect mic. All of it local - see UDinoVoiceSubsystem.
  *
  * Start Round, Restart Round and Back to Lobby show only for the host. The server checks again
  * regardless (see ADinoPlayerController's server RPCs): a hidden button is a convenience, not
@@ -59,6 +66,14 @@ private:
 
 	void Refresh();
 
+	void BuildVoiceColumn(UPanelWidget* Parent);
+
+	/** Rows rebuilt when the set of other players changes, otherwise just refreshed. */
+	void RefreshVoice();
+
+	/** The mic list never changes after startup (see UDinoVoiceSubsystem), so it is filled once. */
+	void FillMicPicker();
+
 	UFUNCTION()
 	void HandleStartClicked();
 
@@ -73,6 +88,17 @@ private:
 
 	UFUNCTION()
 	void HandleLeaveClicked();
+
+	UFUNCTION()
+	void HandleMicPicked(FString SelectedItem, ESelectInfo::Type SelectionType);
+
+	UFUNCTION()
+	void HandleSensitivityChanged(float Value);
+
+	UFUNCTION()
+	void HandleReconnectMicClicked();
+
+	class UDinoVoiceSubsystem* GetVoiceSubsystem() const;
 
 	ADinoPlayerController* GetDinoController() const;
 
@@ -102,6 +128,30 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UButton> LeaveButton;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UVerticalBox> VoiceRowBox;
+
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UDinoVoiceRow>> VoiceRows;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UTextBlock> NoOtherPlayersText;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UComboBoxString> MicPicker;
+
+	UPROPERTY(Transient)
+	TObjectPtr<USlider> SensitivitySlider;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UTextBlock> MicLevelText;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UTextBlock> MicNoticeText;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UButton> ReconnectMicButton;
 
 	FTimerHandle RefreshTimer;
 };

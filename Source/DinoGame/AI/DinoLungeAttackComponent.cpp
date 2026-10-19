@@ -4,6 +4,7 @@
 #include "AI/DinoCreature.h"
 #include "Components/CapsuleComponent.h"
 #include "DinoCharacter.h"
+#include "DinoDamageTypes.h"
 #include "DinoGame.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/OverlapResult.h"
@@ -406,4 +407,9 @@ void UDinoLungeAttackComponent::AppendSetupCheck(TArray<FString>& OutLines) cons
 			? FString()
 			: FString::Printf(TEXT("moved in %d frames - does the StateTree have an Attacking state?"),
 				WindupMovementFrames)));
+}
+
+TSubclassOf<UDamageType> UDinoLungeAttackComponent::GetDamageType() const
+{
+	return UDinoDamageType_Bite::StaticClass();
 }

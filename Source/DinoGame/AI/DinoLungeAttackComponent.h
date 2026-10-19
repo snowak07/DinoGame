@@ -97,6 +97,9 @@ protected:
 	float PinSettleDuration = 0.2f;
 
 	virtual bool CanTriggerFromAwareness(EDinoAwareness Awareness) const override;
+
+	/** Both the bite that lands the pin and the damage while pinned. */
+	virtual TSubclassOf<UDamageType> GetDamageType() const override;
 	virtual ADinoCharacter* SelectVictim(bool bForced) const override;
 
 	/** Forced only: lets DinoSetState loop lunges with nobody to aim at, straight ahead. */

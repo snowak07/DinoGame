@@ -1,8 +1,9 @@
 @echo off
 REM ---------------------------------------------------------------------------
-REM DinoGame: build + cook + package, and optionally publish to itch.io.
+REM DinoGame: build + cook + package, and optionally deploy or publish it.
 REM
 REM   package.bat            build and package only
+REM   package.bat deploy     build, package, and copy to the test PC (deploy.bat)
 REM   package.bat publish    build, package, and upload to itch
 REM
 REM Close the Unreal editor and every running DinoGame.exe before running this.
@@ -29,6 +30,8 @@ set ITCH_CHANNEL=windows-playtest
 
 set PUBLISH=0
 if /I "%~1"=="publish" set PUBLISH=1
+set DEPLOY=0
+if /I "%~1"=="deploy" set DEPLOY=1
 
 tasklist /FI "IMAGENAME eq DinoGame.exe" 2>nul | find /I "DinoGame.exe" >nul
 if not errorlevel 1 (
@@ -42,6 +45,10 @@ if not errorlevel 1 (
 )
 
 REM Fail before a 10-minute build rather than after it.
+if "%DEPLOY%"=="1" (
+    call "%PROJDIR%\deploy.bat" check
+    if errorlevel 1 exit /b 1
+)
 if "%PUBLISH%"=="1" (
     if "%ITCH_TARGET%"=="" (
         echo ERROR: ITCH_TARGET is not set. Edit this script and set it to ^<itch-user^>/^<project^>.
@@ -90,11 +97,20 @@ call "%UE%\Engine\Build\BatchFiles\RunUAT.bat" BuildCookRun ^
     -nocompileeditor -utf8output
 if errorlevel 1 goto :fail
 
+if "%DEPLOY%"=="1" (
+    echo.
+    echo === [3/3] Deploying to the test PC ===
+    call "%PROJDIR%\deploy.bat"
+    if errorlevel 1 goto :fail
+    exit /b 0
+)
+
 if "%PUBLISH%"=="0" (
     echo.
     echo === DONE ^(not published^) ===
     echo Package: %ARCHIVE%\Windows
     echo Run it with:  "%ARCHIVE%\Windows\DinoGame.exe" -log
+    echo Copy it to the test PC with:  deploy.bat
     echo Upload it with:  package.bat publish
     exit /b 0
 )

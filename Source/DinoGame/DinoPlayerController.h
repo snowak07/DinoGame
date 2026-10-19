@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/PlayerController.h"
+#include "DinoPlayerState.h"
 #include "DinoPlayerController.generated.h"
 
 UCLASS()
@@ -41,6 +42,20 @@ public:
 
 	UFUNCTION(Server, Reliable)
 	void ServerStartRound();
+
+	/**
+	 * Whether this player, while spectating, hears the living: true while their camera follows a
+	 * teammate or in the free camera, false in the overhead camera. Server copy, read by
+	 * ADinoGameMode::RefreshVoiceRules. Set from the spectator camera, which only exists on the
+	 * player's own machine.
+	 */
+	bool HearsLivingWhileSpectating() const { return bSpectatorHearsLiving; }
+
+	/** Local. Called by ADinoSpectatorPawn every frame; only sends when the answer changes. */
+	void SetSpectatorHearsLiving(bool bHearsLiving);
+
+	UFUNCTION(Server, Reliable)
+	void ServerSetSpectatorHearsLiving(bool bHearsLiving);
 
 	UFUNCTION(Server, Reliable)
 	void ServerRestartRound();
@@ -98,9 +113,17 @@ public:
 	UFUNCTION(Exec)
 	void DinoNetStatus();
 
-	/** Prints whether voice is enabled, who is registered as a talker, and the engine's own dump. */
+	/**
+	 * Prints voice state: your mic (device, peak level over the last few seconds against the
+	 * level speech must reach to be sent, capture state), and for every other player whether
+	 * they are talking, muted by you, and heard from their body or unpositioned.
+	 */
 	UFUNCTION(Exec)
 	void DinoVoiceStatus();
+
+	/** Re-reads the mic list and reopens the right mic now. Same as Reconnect mic in the Tab menu. */
+	UFUNCTION(Exec)
+	void DinoMicRefresh();
 
 	/** Lists every AI creature with its awareness, target, and last known location. */
 	UFUNCTION(Exec)
@@ -182,6 +205,14 @@ protected:
 	 * owning client after ClientGotoState. Only the local half does anything here.
 	 */
 	virtual void BeginSpectatingState() override;
+
+	/**
+	 * Keeps a spectator spectating when their old body is destroyed. The engine's default
+	 * (AController::PawnPendingDestroy) switches the controller to Inactive, which destroys the
+	 * spectator camera - and on a joining player's machine the body's destruction could arrive
+	 * while the controller still held it, freezing their view on the dead body.
+	 */
+	virtual void PawnPendingDestroy(APawn* InPawn) override;
 	virtual void AcknowledgePossession(APawn* NewPawn) override;
 	virtual void ClientVoiceHandshakeComplete() override;
 
@@ -214,6 +245,24 @@ private:
 	 * and shows the spectator overlay whenever spectating a round.
 	 */
 	void PollSessionUI();
+
+	/**
+	 * "<name> was eaten" when another player dies. Bound to each new game state as the session
+	 * UI poll finds it; local controllers only. Your own death says "You died" from the
+	 * character instead.
+	 */
+	UFUNCTION()
+	void HandlePlayerStatusChanged(ADinoPlayerState* ChangedPlayer, EDinoPlayerStatus OldStatus, EDinoPlayerStatus NewStatus);
+
+	/** Re-sends this player's Tab-menu mutes whenever someone joins - see UDinoVoiceSubsystem::ReapplyMutes. */
+	UFUNCTION()
+	void HandlePlayerListChanged();
+
+	/** Server copy - see HearsLivingWhileSpectating. */
+	bool bSpectatorHearsLiving = true;
+
+	/** Local copy of the last value sent. */
+	TOptional<bool> SentSpectatorHearsLiving;
 
 	FTimerHandle SessionUITimer;
 	FName LastSeenMatchState;

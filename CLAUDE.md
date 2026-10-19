@@ -28,6 +28,7 @@ silently doing nothing.
 ```
 package.bat            build + cook + package
 package.bat publish    ...and upload to itch
+package.bat deploy     ...and copy to the test PC over the LAN (deploy.bat)
 ```
 
 Single target, for a compile check:
@@ -150,8 +151,9 @@ resetting actors by hand.
   (`UAISense_Sight::bAutoRegisterAllPawnsAsSources`), and a spectator pawn has a player behind
   it. Targeting must check for a living `ADinoCharacter`, not "a pawn with a player" — the
   looser rule had dinos hunting the host's spectator camera.
-- **`bIsAlive` means "has a living character this round"** and defaults to false. Any looser
-  meaning counts lobby players and late joiners as alive, and the round can never end.
+- **"Alive" means "has a living character this round"** (player status Alive or Downed), and a
+  player starts as Lobby. Any looser meaning counts lobby players and late joiners as alive, and
+  the round can never end.
 - **PlayerCanRestart is the only spawn gate**, and the engine also asks it for late joiners and
   for a dead client clicking. It returns true only inside `HandleMatchHasStarted`.
 - **Seamless travel is off in PIE** (`net.AllowPIESeamlessTravel`), so an editor restart is a
@@ -165,6 +167,11 @@ resetting actors by hand.
 - **Seamless travel carries the world clock over** (`LoadedWorld->TimeSeconds` is copied from the
   old world). Never time "since this map started" by comparing `GetTimeSeconds()` to a constant:
   minutes into a session it is already past. Record a start time and compare to that.
+- **Destroying a spectator's old body can destroy their spectator camera.** The engine's
+  `AController::PawnPendingDestroy` sends the controller to Inactive, which removes the camera,
+  and on a client the destruction can arrive while the controller still holds the body. That
+  froze joining players' views on their corpse. Dead bodies now stay until the map reloads, and
+  `ADinoPlayerController::PawnPendingDestroy` keeps a spectator spectating regardless.
 - **A seamless restart keeps each PlayerController, including its input mode**, while removing
   its widgets. Anything that set UI-only input must be undone explicitly on round start, not
   only when its widget is found still on screen.
@@ -172,6 +179,31 @@ resetting actors by hand.
   from `StartPlay`, and a yes there skips `NotifyBeginPlay` and starts the round first —
   characters are possessed before their world begins play, and the player cannot move or look.
   Solo restarts hit this every time, because everyone is already present when the map starts.
+
+### Player status
+
+Each `ADinoPlayerState` has a status (Lobby, Alive, Downed, Dead) and, when Dead, a cause. They
+replicate together as one struct. It is the single answer to "where is this player in the round";
+spectating, the round end, the Tab menu and, next, voice all read it.
+
+- **Only the server changes it** (`SetStatus`), and every change is pushed at once with
+  `ForceNetUpdate`. A PlayerState otherwise sends updates once a second.
+- **Every death goes through `ADinoGameMode::KillPlayer(Controller, DamageType)`.** Lethal
+  damage reaches it from the character; falling below Kill Z reaches it from
+  `ADinoCharacter::FellOutOfWorld`, which replaces Unreal's default of silently deleting the
+  character. A new way to die calls `KillPlayer`, not `SetStatus`.
+- **The cause is the damage type class** (`UDinoDamageType_Bite`, `_Devour`, `_Fall`), carried
+  through `ApplyDamage` as Unreal intends. Each attack component reports its own through
+  `GetDamageType`.
+- **Listen on `ADinoGameState::OnPlayerStatusChanged` and `OnPlayerListChanged`**, and rebuild
+  from everyone's current status in the handler rather than applying the one change. A late
+  joiner or a late binder never sees the changes before it. On a client a PlayerState can also
+  arrive before the game state, and its relayed change is then skipped.
+- **Server reactions vs local reactions.** Round end, spectating and voice muting are decided on
+  the server. UI, camera and listening position are local. The event fires on every machine, so
+  check which side you are on.
+- **Anything that must happen in order stays a step inside `KillPlayer`**, not a separate
+  listener. Unreal does not guarantee listener order.
 
 The new screens (`UDinoSessionMenu`, `UDinoSpectatorOverlay`) are laid out in C++ with
 `WidgetTree->ConstructWidget` — no Blueprint to keep in step. Spectator controls are input
@@ -182,11 +214,61 @@ actions created at runtime in `ADinoSpectatorPawn`, so no input assets either.
 ## Voice chat
 
 Unreal's built-in VOIP over the same connection — no hosted voice service, so no new central
-dependency. Open mic (voice-activated, no push-to-talk). `UVOIPTalker` on `ADinoCharacter`,
-spatialised with distance falloff and occlusion through geometry.
+dependency. Open mic (voice-activated, no push-to-talk). Spatialised with distance falloff and
+occlusion through geometry.
 
-`UVOIPTalker` is a `UActorComponent`, not a scene component: spatialisation comes from
-`Settings.ComponentToAttachTo`, and occlusion applies only to spatialised sources.
+**Each player's voice is a `UDinoVoiceTalker` on their `ADinoPlayerState`, not on the
+character.** A talker on the character only existed while a body did, so voices with no body
+yet (the lobby, the first moments of a round) or any more (the dead) played unpositioned, at
+full volume to everyone. The PlayerState lasts the whole session; the character only lends it a
+position (`SetVoiceBody`), and `RefreshVoicePlacement` decides from scratch where the voice
+comes from whenever status or body changes. Alive with a body: from the body, with attenuation.
+Anything else: unpositioned.
+
+- `UVOIPTalker` is a `UActorComponent`, not a scene component: spatialisation comes from
+  `Settings.ComponentToAttachTo`, and occlusion applies only to spatialised sources.
+- **The engine reads those settings only when a speaker's voice starts playing**
+  (`FVoiceEngineImpl::SubmitRemoteVoiceData`), and keeps the sound player going between
+  sentences. Changing the settings does nothing to a voice already playing, so
+  `UDinoVoiceTalker::RefreshVoice` releases the player and the next packet starts a new one.
+- **The engine's talker lookup holds one talker per net ID, and a talker leaving deletes
+  whatever entry has its ID**, even one a newer talker took over. Every seamless restart gives
+  each player a new PlayerState on the server, registers its talker, *then* destroys the old one
+  (`AGameMode::HandleSeamlessTravelPlayer`), so from the first restart the host heard every
+  client unpositioned. `UDinoVoiceTalker::UnregisterKeepingNewer` puts the newer entry back.
+  Register in `OnSetUniqueId`, not `OnRep_UniqueId`: on the server the ID is set at login, after
+  BeginPlay, and RepNotifies never fire there. `DinoVoiceStatus` flags `NOT REGISTERED`.
+- The engine's talker lookup (`UVOIPStatics`) is one map for the whole process, so in
+  multi-client Play In Editor the clients overwrite each other's talkers. Proximity and placement
+  can only be tested packaged, on two machines.
+
+**Who hears whom is the server's call, rebuilt from player status** (`ADinoGameMode::
+RefreshVoiceRules`, on every status, player list, match state and spectator camera change). It
+uses the engine's gameplay mute, so the server stops forwarding the voice rather than each client
+discarding it. During a round the living never hear the dead; the dead hear the dead, and the
+living only in the follow and free spectator cameras, not overhead. Following, the listening
+position moves to the teammate (`ADinoSpectatorPawn::UpdateHearing`); free, it is the camera. Lobby and round over: everyone hears
+everyone. A Tab-menu mute is the engine's player mute, a separate reason, so neither undoes the
+other.
+
+**The listen-server host needs its own unmute** (`ADinoGameMode::UnmuteForGameplay`). The host's
+controller is both the server's and the client's copy of itself, sharing one mute list, so the
+gameplay mute's client half adds a second reason to the same list and the gameplay unmute never
+completes. Without it the host stops hearing anyone who has ever died, for the rest of the session.
+
+**Mic recovery is `UDinoVoiceSubsystem`.** The engine's Windows capture opens one mic, once: an
+unplugged mic never came back and a changed Windows default was ignored. The subsystem watches
+Windows device changes and reopens the right mic through the engine's own capture
+(`IVoiceCapture::ChangeDevice`). It can only open a mic that existed at startup, because the
+engine reads the device list once; a later one gets a "restart to use it" notice. Using any mic
+without a restart is the Notion backlog item "Mic capture on AudioCaptureCore". Reaching the
+capture needs the engine's protected members (see `GetEngineMicCapture`), written against 5.8.1:
+check it on an engine upgrade.
+
+**Mic sensitivity sets `voice.SilenceDetectionThreshold` at code priority.** Both it and
+`voice.MicNoiseGateThreshold` are set in `[SystemSettings]`, which outranks the game-setting
+priority `UVOIPStatics::SetMicThreshold` uses, so that call is silently ignored. Words cut off, or
+crackle, from a quiet mic means the threshold is too high for it.
 
 Tuning lives in `Config/DefaultEngine.ini` under `[Voice]`, `[SystemSettings]`, and
 `[/Script/Engine.AudioSettings]`. **All of it is read once at startup**, so changes need a
@@ -197,7 +279,10 @@ repackage, not a restart. `VoiPSampleRate` defaults to 16 kHz and sounds like a 
 each remote speaker an audio component registered straight into the world, owned by no actor,
 and only clears it after the *next* map loads (`FVoiceEngineImpl::OnPostLoadMap`). Seamless
 travel destroys the old world first, so a restart while someone talks crashed the client on the
-audio thread. The subsystem destroys those components on `OnWorldCleanup`. Do not remove it.
+audio thread. The subsystem destroys those components on `OnWorldCleanup`, and again on shutdown.
+Do not remove it. Stopping a voice must flush the audio thread before destroying its component
+(`ReleaseSpeakerAudio`), or the engine's `OwningSynthComponent.IsValid()` ensure fires and the
+game stutters.
 
 **Push-to-talk must stay off in config** (`[/Script/Engine.GameSession] bRequiresPushToTalk=False`
 in `DefaultGame.ini`). The engine default is on, and the server re-applies it to every player each

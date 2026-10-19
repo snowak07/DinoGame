@@ -312,7 +312,12 @@ void UDinoAttackComponent::DealDamage(ADinoCharacter* Victim, float Amount, cons
 	// Point damage rather than plain so the direction travels with the hit - unused today, but
 	// it is what a hit reaction or a knock-back will want, and it costs nothing to carry.
 	UGameplayStatics::ApplyPointDamage(Victim, Amount, FromDirection, FHitResult(),
-		GetAIController(), GetOwner(), UDamageType::StaticClass());
+		GetAIController(), GetOwner(), GetDamageType());
+}
+
+TSubclassOf<UDamageType> UDinoAttackComponent::GetDamageType() const
+{
+	return UDamageType::StaticClass();
 }
 
 float UDinoAttackComponent::EdgeDistance2D(const AActor* Other) const

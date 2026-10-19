@@ -396,6 +396,27 @@ butler push "<out>\Windows" <itch-user>/dino-game:windows-playtest
 Add this as the last line of `package.bat` once the itch project exists, so shipping a
 build is one double-click.
 
+### Deploy to the test PC (dev loop)
+
+itch is for playtests with other people. For a second machine of your own, copy over the
+LAN instead. That takes seconds, where an itch upload and download takes minutes:
+
+```bat
+package.bat deploy     package, then copy to the test PC
+deploy.bat             copy the existing package only
+```
+
+`deploy.bat` mirrors the package with `robocopy /MIR` into a shared folder on the test
+PC (`DEPLOY_TARGET`, set at the top of the script or in the environment). It leaves
+the test PC's `Saved/` alone, so its log stays readable from here at
+`<share>\DinoGame\Saved\Logs\DinoGame.log`. Close `DinoGame.exe` on the test PC first,
+because the running game locks the files being replaced.
+
+One-time setup on the test PC: set its network to **Private**, turn on **Network
+discovery** and **File and printer sharing**, share a folder (for example `C:\DinoGame`)
+with your account given **Change** permission, then open `\\<testpc>\DinoGame` once in
+File Explorer on this machine and tick **Remember my credentials**.
+
 ### Why itch and not the repo
 
 The repo and the playable build are different artifacts for different audiences.

@@ -64,6 +64,7 @@ protected:
 	float SwallowDuration = 2.0f;
 
 	virtual bool CanTriggerFromAwareness(EDinoAwareness Awareness) const override;
+	virtual TSubclassOf<UDamageType> GetDamageType() const override;
 	virtual ADinoCharacter* SelectVictim(bool bForced) const override;
 	virtual void BeginAttack(ADinoCharacter* Victim) override;
 	virtual void OnPhaseTimerElapsed() override;

@@ -98,6 +98,28 @@ private:
 	void UpdateOverhead();
 
 	/**
+	 * What this spectator hears, from the camera mode. Following a teammate: the living, heard
+	 * from where that teammate stands, as if listening over their shoulder - plus the dead.
+	 * Free: the living by proximity to the camera, plus the dead. Overhead: only the dead and
+	 * other spectators - it sits far above everyone, so proximity would hear nothing anyway.
+	 *
+	 * The where is local (the listener position); the who is the server's (it stops sending
+	 * the living's voices), told through ADinoPlayerController::SetSpectatorHearsLiving.
+	 */
+	void UpdateHearing();
+
+	void ClearListenerOverride();
+
+	/** The component the listener is pinned to, so it is only reset when the target changes. */
+	TWeakObjectPtr<USceneComponent> ListenerTarget;
+
+	/**
+	 * The controller holding the override. Kept because by EndPlay the controller has usually
+	 * already unpossessed this camera, and Controller is null.
+	 */
+	TWeakObjectPtr<APlayerController> ListenerController;
+
+	/**
 	 * Where the overhead view sits. An actor tagged DinoOverhead wins - a designer placing a
 	 * Camera Actor is the way to get a deliberate shot. Otherwise high above the middle of every
 	 * player and creature, which works on any map with no setup.

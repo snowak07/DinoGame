@@ -34,8 +34,20 @@ public class DinoGame : ModuleRules
 			"GameplayTags",
 			// UGameMapsSettings, so leaving a session can find the main menu from the same
 			// GameDefaultMap setting the engine boots into, rather than a second copy of it.
-			"EngineSettings"
+			"EngineSettings",
+			// IVoiceCapture, so UDinoVoiceSubsystem can reopen the mic after it is unplugged.
+			"Voice",
+			// FUniqueNetIdRepl::ToString, for per-player voice settings. The monolithic game build
+			// links it anyway; the editor's modular build does not.
+			"CoreOnline"
 		});
+
+		if (Target.Platform == UnrealTargetPlatform.Win64)
+		{
+			// UDinoVoiceSubsystem lists mics the way the engine's capture does (DirectSound) and
+			// watches Windows for device changes (Core Audio, through COM).
+			PublicSystemLibraries.AddRange(new string[] { "dsound.lib", "ole32.lib" });
+		}
 
 		PublicIncludePaths.AddRange(new string[] {
 			"DinoGame"

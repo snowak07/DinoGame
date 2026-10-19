@@ -7,13 +7,13 @@
 #include "DinoCharacter.generated.h"
 
 class ADinoCreature;
+class UDamageType;
 class UDinoFlareGunComponent;
 class UEnhancedInputLocalPlayerSubsystem;
 class UInputAction;
 class UInputMappingContext;
 class UPrimitiveComponent;
 class USoundAttenuation;
-class UVOIPTalker;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FDinoHealthChanged, float, NewHealth, float, Delta);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FDinoDied);
@@ -36,6 +36,20 @@ public:
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	virtual float TakeDamage(float Damage, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
 
+	/**
+	 * Below the level's Kill Z. Unreal's default deletes the character outright, which skipped
+	 * every part of a death - no spectating, and the player stayed counted as alive, so the round
+	 * could never end. Routed through ADinoGameMode::KillPlayer instead, as a Fall.
+	 */
+	virtual void FellOutOfWorld(const UDamageType& DamageType) override;
+
+	/**
+	 * Server only. Kills the body - health to zero, with everything that follows on every
+	 * machine - for deaths that are not lethal damage. Called by ADinoGameMode::KillPlayer; call
+	 * that rather than this, so the player's status changes too. Safe when already dead.
+	 */
+	void Die(TSubclassOf<UDamageType> Cause);
+
 	UFUNCTION(BlueprintPure, Category = "Dino|Health")
 	float GetCurrentHealth() const { return CurrentHealth; }
 
@@ -57,8 +71,16 @@ public:
 	FDinoDied OnDied;
 
 	/** 0 while silent, rising with speech volume. Driven by the voice engine, not replicated. */
+	/** This player's current voice level, 0 when silent. From their PlayerState's voice talker. */
 	UFUNCTION(BlueprintPure, Category = "Dino|Voice")
 	float GetVoiceLevel() const;
+
+	/**
+	 * The proximity and occlusion settings this body's voice plays with: the assigned
+	 * VoiceAttenuation asset, or one built from the tunables below. Used by the player's voice
+	 * talker while they are alive (ADinoPlayerState::RefreshVoicePlacement).
+	 */
+	USoundAttenuation* GetVoiceAttenuation();
 
 	UFUNCTION(BlueprintPure, Category = "Dino|Weapons")
 	UDinoFlareGunComponent* GetFlareGun() const { return FlareGun; }
@@ -183,19 +205,10 @@ protected:
 
 	/**
 	 * Every player carries one. Created here in the C++ parent so BP_FirstPersonCharacter
-	 * inherits it with no editor work, the same as VoipTalker.
+	 * inherits it with no editor work.
 	 */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Dino|Weapons")
 	TObjectPtr<UDinoFlareGunComponent> FlareGun;
-
-	/**
-	 * This player's voice source. A UActorComponent, not a scene component — it carries no
-	 * transform of its own. Spatialisation comes later from Settings.ComponentToAttachTo plus a
-	 * USoundAttenuation asset; while both are null the voice plays unspatialised, which is what
-	 * phase 1 wants.
-	 */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Dino|Voice")
-	TObjectPtr<UVOIPTalker> VoipTalker;
 
 	/**
 	 * Optional hand-tuned attenuation asset. Leave null and a sensible one is built in code from
@@ -240,6 +253,12 @@ protected:
 
 private:
 	void ApplyHealthChange(float OldHealth);
+
+	/**
+	 * Server only. The damage type of the hit that is killing this character, recorded before
+	 * health is applied so the death can report it. A Bite for a pin, a Devour for a T-Rex.
+	 */
+	TSubclassOf<UDamageType> PendingDeathCause;
 
 	/**
 	 * Everything that has to happen when health reaches zero. Runs on every machine, from the
@@ -301,14 +320,12 @@ private:
 	TWeakObjectPtr<AController> RestraintInputController;
 
 	/**
-	 * Binds VoipTalker to this pawn's PlayerState. Called from both PossessedBy and
-	 * OnRep_PlayerState because the PlayerState arrives at different times on the server and on
-	 * clients, and registering against a null one silently does nothing.
+	 * Tells this player's PlayerState that this is their body, so their voice comes from it.
+	 * Called from BeginPlay, PossessedBy and OnRep_PlayerState, because the PlayerState arrives at
+	 * different times on the server and on clients. The voice talker itself lives on the
+	 * PlayerState (UDinoVoiceTalker explains why).
 	 */
-	void RegisterVoiceTalker();
-
-	/** Returns the assigned asset, or lazily builds one from the tunables above. */
-	USoundAttenuation* ResolveVoiceAttenuation();
+	void BindVoiceToPlayerState();
 
 	/** Holds the code-built attenuation so it is not garbage collected. */
 	UPROPERTY(Transient)

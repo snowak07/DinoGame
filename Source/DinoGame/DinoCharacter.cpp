@@ -3,6 +3,8 @@
 #include "AI/DinoCreature.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "DinoDamageTypes.h"
+#include "Engine/DamageEvents.h"
 #include "DinoGame.h"
 #include "DinoGameMode.h"
 #include "DinoPlayerController.h"
@@ -11,7 +13,6 @@
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/PlayerState.h"
 #include "Net/UnrealNetwork.h"
-#include "Net/VoiceConfig.h"
 #include "Sound/SoundAttenuation.h"
 #include "Camera/CameraComponent.h"
 #include "EnhancedInputComponent.h"
@@ -31,7 +32,6 @@ ADinoCharacter::ADinoCharacter()
 
 	// Adding this to the C++ parent propagates it to BP_FirstPersonCharacter as an inherited
 	// component, so the reparented Blueprint picks it up without any editor work.
-	VoipTalker = CreateDefaultSubobject<UVOIPTalker>(TEXT("VoipTalker"));
 
 	FlareGun = CreateDefaultSubobject<UDinoFlareGunComponent>(TEXT("FlareGun"));
 
@@ -90,6 +90,11 @@ void ADinoCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompo
 void ADinoCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	RemoveCharacterInput();
+
+	if (ADinoPlayerState* DinoState = GetPlayerState<ADinoPlayerState>())
+	{
+		DinoState->ClearVoiceBody(this);
+	}
 
 	Super::EndPlay(EndPlayReason);
 }
@@ -182,7 +187,7 @@ void ADinoCharacter::BeginPlay()
 	}
 
 	// Covers the listen-server host, whose PlayerState already exists by BeginPlay.
-	RegisterVoiceTalker();
+	BindVoiceToPlayerState();
 }
 
 void ADinoCharacter::PossessedBy(AController* NewController)
@@ -190,7 +195,7 @@ void ADinoCharacter::PossessedBy(AController* NewController)
 	Super::PossessedBy(NewController);
 
 	// Server path: the PlayerState is assigned during possession.
-	RegisterVoiceTalker();
+	BindVoiceToPlayerState();
 }
 
 void ADinoCharacter::OnRep_PlayerState()
@@ -198,28 +203,18 @@ void ADinoCharacter::OnRep_PlayerState()
 	Super::OnRep_PlayerState();
 
 	// Client path: the PlayerState replicates in separately from the pawn, often after BeginPlay.
-	RegisterVoiceTalker();
+	BindVoiceToPlayerState();
 }
 
-void ADinoCharacter::RegisterVoiceTalker()
+void ADinoCharacter::BindVoiceToPlayerState()
 {
-	APlayerState* OwningState = GetPlayerState();
-	if (!VoipTalker || !OwningState)
+	if (ADinoPlayerState* DinoState = GetPlayerState<ADinoPlayerState>())
 	{
-		return;
+		DinoState->SetVoiceBody(this);
 	}
-
-	VoipTalker->RegisterWithPlayerState(OwningState);
-
-	// Spatialisation: without ComponentToAttachTo the voice plays unpositioned, and occlusion
-	// only applies to spatialised sources — so both of these are needed for either to work.
-	VoipTalker->Settings.ComponentToAttachTo = GetRootComponent();
-	VoipTalker->Settings.AttenuationSettings = ResolveVoiceAttenuation();
-
-	UE_LOG(LogDinoNet, Verbose, TEXT("Voice talker registered for %s."), *OwningState->GetPlayerName());
 }
 
-USoundAttenuation* ADinoCharacter::ResolveVoiceAttenuation()
+USoundAttenuation* ADinoCharacter::GetVoiceAttenuation()
 {
 	if (VoiceAttenuation)
 	{
@@ -262,7 +257,8 @@ USoundAttenuation* ADinoCharacter::ResolveVoiceAttenuation()
 
 float ADinoCharacter::GetVoiceLevel() const
 {
-	return VoipTalker ? VoipTalker->GetVoiceLevel() : 0.0f;
+	const ADinoPlayerState* DinoState = GetPlayerState<ADinoPlayerState>();
+	return DinoState ? DinoState->GetVoiceLevel() : 0.0f;
 }
 
 float ADinoCharacter::TakeDamage(float Damage, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
@@ -274,11 +270,48 @@ float ADinoCharacter::TakeDamage(float Damage, const FDamageEvent& DamageEvent, 
 		return 0.0f;
 	}
 
+	PendingDeathCause = DamageEvent.DamageTypeClass;
+
 	const float OldHealth = CurrentHealth;
 	CurrentHealth = FMath::Max(0.0f, CurrentHealth - ActualDamage);
 	ApplyHealthChange(OldHealth);
 
 	return ActualDamage;
+}
+
+void ADinoCharacter::Die(TSubclassOf<UDamageType> Cause)
+{
+	if (!HasAuthority() || !IsAlive())
+	{
+		return;
+	}
+
+	PendingDeathCause = Cause;
+
+	const float OldHealth = CurrentHealth;
+	CurrentHealth = 0.0f;
+	ApplyHealthChange(OldHealth);
+}
+
+void ADinoCharacter::FellOutOfWorld(const UDamageType& DamageType)
+{
+	// Not Super: that deletes the character. Clients do nothing - the server decides deaths, and
+	// the engine itself only acts on the authority here.
+	if (!HasAuthority() || !IsAlive())
+	{
+		return;
+	}
+
+	// Always a Fall, whatever the level's KillZDamageType says, so no World Settings change is
+	// needed for the cause to read right.
+	if (ADinoGameMode* GameMode = GetWorld() ? GetWorld()->GetAuthGameMode<ADinoGameMode>() : nullptr)
+	{
+		GameMode->KillPlayer(GetController(), UDinoDamageType_Fall::StaticClass());
+	}
+	else
+	{
+		Die(UDinoDamageType_Fall::StaticClass());
+	}
 }
 
 void ADinoCharacter::Heal(float Amount)
@@ -341,6 +374,13 @@ void ADinoCharacter::HandleDeath()
 	SetActorHiddenInGame(true);
 	SetActorEnableCollision(false);
 
+	// The voice stops coming from this body now. The player status says the same once it
+	// arrives; whichever reaches this machine first, the answer is the same.
+	if (ADinoPlayerState* VoiceState = GetPlayerState<ADinoPlayerState>())
+	{
+		VoiceState->RefreshVoicePlacement();
+	}
+
 	if (IsLocallyControlled())
 	{
 		// The pawn's input only - the host/join menu is bound on the PlayerController, so a dead
@@ -368,17 +408,11 @@ void ADinoCharacter::HandleDeath()
 		// restraint cannot outlive the victim whatever killed them.
 		EndRestraint();
 
-		// The first caller SetIsAlive has ever had - until now ADinoGameState::GetAlivePlayerCount
-		// has always equalled the player count.
-		if (ADinoPlayerState* DinoState = GetPlayerState<ADinoPlayerState>())
-		{
-			DinoState->SetIsAlive(false);
-		}
-
-		// After SetIsAlive, so the game mode's round-over check already counts this player out.
+		// The player's side of the death - status, spectating, the round-end check - is the game
+		// mode's. A no-op when the game mode started this death itself (KillPlayer -> Die).
 		if (ADinoGameMode* GameMode = GetWorld() ? GetWorld()->GetAuthGameMode<ADinoGameMode>() : nullptr)
 		{
-			GameMode->NotifyPlayerDied(GetController());
+			GameMode->KillPlayer(GetController(), PendingDeathCause);
 		}
 	}
 }

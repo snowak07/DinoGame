@@ -4,6 +4,7 @@
 #include "DinoCharacter.h"
 #include "DinoGame.h"
 #include "DinoGameState.h"
+#include "DinoPlayerController.h"
 #include "EngineUtils.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/World.h"
@@ -30,6 +31,12 @@ namespace
 
 	/** Radius of the probe that stops the orbit camera passing through walls. */
 	constexpr float CameraProbeRadius = 12.0f;
+
+	/**
+	 * Where a following spectator listens from, above the teammate's capsule centre: about
+	 * head height, so voices are heard as the teammate would hear them.
+	 */
+	const FVector FollowListenerOffset(0.0f, 0.0f, 60.0f);
 }
 
 ADinoSpectatorPawn::ADinoSpectatorPawn()
@@ -61,6 +68,10 @@ void ADinoSpectatorPawn::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		Subsystem->RemoveMappingContext(InputContext);
 	}
+
+	// The override lives on the controller, which outlives this camera: left set, a player who
+	// respawns would go on hearing from wherever their old follow target stood.
+	ClearListenerOverride();
 
 	Super::EndPlay(EndPlayReason);
 }
@@ -301,6 +312,50 @@ void ADinoSpectatorPawn::Tick(float DeltaSeconds)
 	{
 		UpdateOverhead();
 	}
+
+	UpdateHearing();
+}
+
+void ADinoSpectatorPawn::UpdateHearing()
+{
+	ADinoPlayerController* DinoController = Cast<ADinoPlayerController>(Controller);
+	if (!DinoController || !DinoController->IsLocalController())
+	{
+		return;
+	}
+
+	const ADinoCharacter* Target = Mode == EDinoSpectateMode::Follow ? FollowTarget.Get() : nullptr;
+	USceneComponent* TargetRoot = Target && Target->IsAlive() ? Target->GetRootComponent() : nullptr;
+
+	// Free hears the living from the camera itself: with no override the listener is already
+	// the view location. Sends only when the answer changes.
+	DinoController->SetSpectatorHearsLiving(TargetRoot != nullptr || Mode == EDinoSpectateMode::Free);
+
+	if (TargetRoot)
+	{
+		if (TargetRoot != ListenerTarget.Get())
+		{
+			ListenerTarget = TargetRoot;
+			ListenerController = DinoController;
+			DinoController->SetAudioListenerAttenuationOverride(TargetRoot, FollowListenerOffset);
+		}
+	}
+	else if (ListenerController.IsValid())
+	{
+		// Also reached when the target was destroyed, which empties ListenerTarget by itself.
+		// The override would then sit at the offset alone - near the world origin.
+		ClearListenerOverride();
+	}
+}
+
+void ADinoSpectatorPawn::ClearListenerOverride()
+{
+	if (APlayerController* PC = ListenerController.Get())
+	{
+		PC->ClearAudioListenerAttenuationOverride();
+	}
+	ListenerTarget.Reset();
+	ListenerController.Reset();
 }
 
 void ADinoSpectatorPawn::UpdateFollow()

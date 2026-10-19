@@ -9,6 +9,7 @@
 class ADinoAIControllerBase;
 class ADinoCharacter;
 class ADinoCreature;
+class UDamageType;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FDinoAttackPhaseChanged, EDinoAttackPhase, NewPhase, EDinoAttackPhase, OldPhase);
 
@@ -171,8 +172,14 @@ protected:
 	 */
 	bool HasClearLineTo(const AActor* Other) const;
 
-	/** Server only. Goes through ApplyPointDamage, so the victim's own TakeDamage decides the rest. */
+	/**
+	 * Server only. Goes through ApplyPointDamage, so the victim's own TakeDamage decides the rest.
+	 * Carries GetDamageType, which is how a death reports what caused it.
+	 */
 	void DealDamage(ADinoCharacter* Victim, float Amount, const FVector& FromDirection) const;
+
+	/** What this attack's damage is reported as, e.g. UDinoDamageType_Bite. See UDinoDamageType. */
+	virtual TSubclassOf<UDamageType> GetDamageType() const;
 
 	/**
 	 * Horizontal gap between the two capsules' surfaces. Measured edge to edge so ranges mean

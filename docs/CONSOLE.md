@@ -99,7 +99,8 @@ everywhere.
 | `DinoLeave` | Leave the session and return to the main menu |
 | `DinoMenu` | Same as Tab: the session menu during a match, the host/join menu anywhere else |
 | `DinoNetStatus` | Build, backend, net mode, net driver, connections |
-| `DinoVoiceStatus` | Voice config and who is talking |
+| `DinoVoiceStatus` | Your mic (device, level, capture state) and every other player's voice: talking, muted by you, heard from their body or unpositioned |
+| `DinoMicRefresh` | Re-read the mic list and reopen the right mic. Same as **Reconnect mic** in the Tab menu |
 
 In `DinoNetStatus`, `net driver : SteamSocketsNetDriver` means traffic is on Steam's relay.
 `IpNetDriver` means it silently fell back to raw IP.
@@ -109,6 +110,24 @@ If Steam wasn't running when the game started, a packaged build refuses `DinoHos
 `PROBLEM` line. Start Steam, then restart the game. Play In Editor is unaffected.
 
 `DinoFind` and `DinoJoin` are scaffolding from before the join menu and will be removed.
+
+### Voice
+
+`DinoVoiceStatus` reports the mic level as the loudest of the **last 3 seconds**, against the level
+speech must reach to be sent. Talk, then run it: typing the command means you are not talking.
+The full engine dump goes to the log only.
+
+The **Tab menu**'s right-hand column has the same controls, all local to your machine:
+
+| | |
+|---|---|
+| **Mute / volume** per player | Mute stops the server sending you their voice. Volume is 0-200%. Both last for the session |
+| **Microphone** | *Windows default* follows the Windows default input, including changes mid-game. Picking a mic sticks to it while it is plugged in. Saved |
+| **Mic sensitivity** | Raise it if your words are cut off or nobody hears you. Saved |
+| **Reconnect mic** | Reopens the mic now |
+
+A mic unplugged and plugged back in reconnects by itself. **Only mics connected when the game
+started can be used**: one connected later gets a "restart to use it" notice.
 
 ---
 
@@ -147,6 +166,11 @@ Dead players, lobby players and late joiners watch through the spectator camera.
 
 The overhead view uses an actor tagged `DinoOverhead` if the level has one (normally a placed
 Camera Actor), and otherwise frames everyone from high above.
+
+What a spectator hears depends on the camera. **Follow**: the living, as the followed teammate
+hears them, plus the dead. **Free**: the living by distance from the camera, plus the dead.
+**Overhead**: only the dead and other spectators. The
+living never hear the dead during a round.
 
 ---
 
