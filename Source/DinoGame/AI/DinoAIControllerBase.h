@@ -52,6 +52,44 @@ public:
 	/** IsValidTarget, for the self-check, so it judges targets by the very rule the AI uses. */
 	bool IsAcceptableTarget(const AActor* Actor) const { return IsValidTarget(Actor); }
 
+	/**
+	 * The nearest valid player this creature can see right now, other than Exclude. The one
+	 * answer to "who is closest" - used to acquire, to switch while hunting, by the vision test
+	 * and by the self-check.
+	 */
+	AActor* FindNearestVisibleTarget(const AActor* Exclude = nullptr, float* OutDistance = nullptr) const;
+
+	/** Whether sight currently reports Actor - live contact, not memory. */
+	bool IsInSight(const AActor* Actor) const;
+
+	/** Seconds since CurrentTarget last changed to a different actor. */
+	double GetSecondsSinceTargetChange() const;
+
+	/** See TargetSwitchCooldown. */
+	float GetTargetSwitchCooldown() const { return TargetSwitchCooldown; }
+
+	/**
+	 * Server only. Something worth a look at Location - a voice, a flare hit, a player felt up
+	 * close - with Source the player responsible. Unless the creature is already hunting or
+	 * attacking (DinoTargetRules::ShouldInvestigate), it searches there: from idle it starts
+	 * searching, mid-search it turns to the new spot at once.
+	 *
+	 * Searching, not hunting: it knows where to look, not where you are. Its sight decides the rest.
+	 *
+	 * Hunting a target that is out of sight, a noise from that same target updates where it
+	 * thinks they are - talking while hiding gives you away - but never switches the hunt.
+	 *
+	 * bForce (a flare hit): investigates even out of a hunt, and if mid-attack or staggered,
+	 * waits for that to end and then does it. Otherwise a raptor shot off a pinned player would
+	 * see its victim again the moment its stagger ended and go straight back.
+	 *
+	 * Returns whether it is now investigating (or will, once its attack ends).
+	 */
+	bool Investigate(const FVector& Location, AActor* Source, const TCHAR* Reason, bool bForce = false);
+
+	/** For UDinoNoiseSubsystem: true at most once per Interval, so a long sentence is one reaction a second. */
+	bool CanReactToVoice(const AActor* Speaker, double Now, double Interval);
+
 	/** Where the target was last perceived. Meaningless while there has never been one. */
 	UFUNCTION(BlueprintPure, Category = "Dino|AI")
 	FVector GetLastKnownLocation() const { return LastKnownLocation; }
@@ -246,9 +284,13 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|AI|Perception", meta = (ClampMin = "0.0"))
 	float LoseSightRadius = 5000.0f;
 
-	/** Half-angle. 90 gives a 180-degree field of view. */
+	/**
+	 * Half-angle. 90 gives a 180-degree field of view; 30 a 60-degree cone. Narrow on purpose
+	 * (it was 70): sight is the confirmation, not the first warning. A creature is meant to
+	 * find you through voices, flares and getting too close (CloseSenseRadius), then see you.
+	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|AI|Perception", meta = (ClampMin = "1.0", ClampMax = "180.0"))
-	float PeripheralVisionAngle = 70.0f;
+	float PeripheralVisionAngle = 30.0f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|AI|Perception", meta = (ClampMin = "0.0"))
 	float HearingRange = 6000.0f;
@@ -299,6 +341,35 @@ protected:
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|AI|Perception", meta = (ClampMin = "0.0"))
 	float HuntPersistenceAfterLosingSight = 3.0f;
+
+	/**
+	 * While hunting, the creature goes after whichever valid player it can see is closest - and
+	 * after any change of target, commits to the new one for this long. Without the commitment
+	 * two players at similar distances would have it flicking between them every tick.
+	 * See DinoTargetRules::ShouldSwitchTarget.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|AI|Perception", meta = (ClampMin = "0.0"))
+	float TargetSwitchCooldown = 2.0f;
+
+	/**
+	 * Within this distance of its body - in any direction, but not through walls - a creature
+	 * notices a player and investigates. With a narrow sight cone, the space right behind a
+	 * creature would otherwise be perfectly safe. 0 turns it off.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|AI|Perception", meta = (ClampMin = "0.0"))
+	float CloseSenseRadius = 300.0f;
+
+	/**
+	 * After a flare hit sends it toward the shooter, how long sight can only lock on to the
+	 * shooter. Without it, a raptor shot off a pinned player would see its victim the moment its
+	 * stagger ended and go straight back - the shot would buy nothing.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|AI|Perception", meta = (ClampMin = "0.0"))
+	float ForcedInvestigationCommitSeconds = 3.0f;
+
+	/** How often a player still within close range re-draws the creature's search onto them. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|AI|Perception", meta = (ClampMin = "0.1"))
+	float CloseSenseInterval = 2.0f;
 
 	/**
 	 * Whether the creature keeps its eyes on the target while chasing.
@@ -451,6 +522,49 @@ private:
 	 * well inside human reaction time, and this is cheap to skip on idle creatures.
 	 */
 	void TickCombat();
+
+	/**
+	 * Hunting only, never mid-attack: switches to the nearest visible player when
+	 * DinoTargetRules::ShouldSwitchTarget says so. Every combat tick, because perception only
+	 * reports changes - a second player walking closer while staying in sight is not one.
+	 */
+	void ReconsiderTarget();
+
+	/** World time CurrentTarget last changed to a different actor, for TargetSwitchCooldown. */
+	double LastTargetChangeTime = -1.0e9;
+
+	/** Close-range sense, from the combat tick. See CloseSenseRadius. */
+	void CheckCloseSense();
+	double LastCloseSenseTime = -1.0e9;
+
+	double LastVoiceReactionTime = -1.0e9;
+
+	/**
+	 * Idle or searching, takes the nearest player in sight. Perception only reports changes, so a
+	 * player already standing in view when the creature started searching would otherwise never
+	 * be noticed - until they stepped out of sight and back in.
+	 */
+	void AcquireVisibleWhileNotHunting();
+
+	/** World time until which only ForcedInvestigationSource can be acquired by sight. */
+	double ForcedInvestigationUntil = -1.0e9;
+	TWeakObjectPtr<AActor> ForcedInvestigationSource;
+
+	/** "Ignored, already hunting" is logged at most this often, or a talking target would flood the log. */
+	double LastIgnoredLogTime = -1.0e9;
+
+	/** A forced investigation (flare hit) received mid-attack, carried out when the attack ends. */
+	bool bHasPendingForcedInvestigation = false;
+	FVector PendingInvestigationLocation = FVector::ZeroVector;
+	TWeakObjectPtr<AActor> PendingInvestigationSource;
+	FString PendingInvestigationReason;
+
+	/**
+	 * Set by Investigate, cleared when a search leg starts walking to it. While set, the search
+	 * query's late answers do not overwrite the investigated spot - the query was asked before
+	 * the noise, about a search that no longer matters.
+	 */
+	bool bInvestigatePointPending = false;
 
 	/** Adopts the attack's victim as the target and switches awareness to Attacking. */
 	void HandleAttackBegan(ADinoCharacter* Victim);

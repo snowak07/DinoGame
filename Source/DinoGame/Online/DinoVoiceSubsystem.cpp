@@ -11,6 +11,7 @@
 #include "Net/VoiceConfig.h"
 #include "Online/DinoVoiceTalker.h"
 #include "OnlineSubsystem.h"
+#include "Interfaces/OnlineIdentityInterface.h"
 #include "OnlineSubsystemNames.h"
 #include "VoiceEngineImpl.h"
 #include "VoiceInterfaceImpl.h"
@@ -236,6 +237,11 @@ void UDinoVoiceSubsystem::Deinitialize()
 {
 	FTSTicker::GetCoreTicker().RemoveTicker(TickHandle);
 
+	if (const IOnlineVoicePtr Voice = TalkingBoundTo.Pin())
+	{
+		Voice->ClearOnPlayerTalkingStateChangedDelegate_Handle(TalkingHandle);
+	}
+
 #if PLATFORM_WINDOWS
 	if (Watcher)
 	{
@@ -247,9 +253,46 @@ void UDinoVoiceSubsystem::Deinitialize()
 	Super::Deinitialize();
 }
 
+void UDinoVoiceSubsystem::BindTalkingState()
+{
+	IOnlineSubsystem* Subsystem = IOnlineSubsystem::Get();
+	const IOnlineVoicePtr Voice = Subsystem ? Subsystem->GetVoiceInterface() : nullptr;
+	if (!Voice.IsValid() || TalkingBoundTo.Pin() == Voice)
+	{
+		return;
+	}
+
+	TalkingBoundTo = Voice;
+	bLocallyTalking = false;
+	TalkingHandle = Voice->AddOnPlayerTalkingStateChangedDelegate_Handle(
+		FOnPlayerTalkingStateChangedDelegate::CreateUObject(this, &UDinoVoiceSubsystem::HandleTalkingStateChanged));
+	UE_LOG(LogDinoNet, Log, TEXT("Voice: listening for this player's talking state."));
+}
+
+void UDinoVoiceSubsystem::HandleTalkingStateChanged(FUniqueNetIdRef Talker, bool bTalking)
+{
+	IOnlineSubsystem* Subsystem = IOnlineSubsystem::Get();
+	const IOnlineIdentityPtr Identity = Subsystem ? Subsystem->GetIdentityInterface() : nullptr;
+	const FUniqueNetIdPtr LocalId = Identity.IsValid() ? Identity->GetUniquePlayerId(0) : nullptr;
+	const bool bNext = NextLocallyTalking(bLocallyTalking, *Talker, bTalking, LocalId.Get());
+	if (bNext != bLocallyTalking)
+	{
+		bLocallyTalking = bNext;
+		UE_LOG(LogDinoNet, Log, TEXT("Voice: you %s talking."), bNext ? TEXT("started") : TEXT("stopped"));
+	}
+}
+
+bool UDinoVoiceSubsystem::NextLocallyTalking(bool bCurrent, const FUniqueNetId& Talker, bool bTalking, const FUniqueNetId* LocalId)
+{
+	// The event fires for remote speakers too; only this machine's own player counts here.
+	return LocalId && Talker == *LocalId ? bTalking : bCurrent;
+}
+
 bool UDinoVoiceSubsystem::Tick(float /*DeltaTime*/)
 {
 	const double Now = FPlatformTime::Seconds();
+
+	BindTalkingState();
 
 	// Mic level, for the Tab menu meter and DinoVoiceStatus.
 	if (const IVoiceEnginePtr Engine = GetVoiceEngine())

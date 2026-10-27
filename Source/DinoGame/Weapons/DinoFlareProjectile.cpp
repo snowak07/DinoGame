@@ -1,5 +1,6 @@
 #include "Weapons/DinoFlareProjectile.h"
 
+#include "AI/DinoAIControllerBase.h"
 #include "AI/DinoCreature.h"
 #include "Components/PointLightComponent.h"
 #include "Components/SphereComponent.h"
@@ -79,6 +80,7 @@ void ADinoFlareProjectile::BeginPlay()
 	Super::BeginPlay();
 
 	SetLifeSpan(Lifetime);
+	LaunchLocation = GetActorLocation();
 
 	// Never the shooter, which it spawns just in front of.
 	if (APawn* Shooter = GetInstigator())
@@ -123,6 +125,13 @@ void ADinoFlareProjectile::HandleOverlap(UPrimitiveComponent* OverlappedComponen
 
 	UE_LOG(LogDinoGame, Log, TEXT("Flare from %s hit %s for %.0f."),
 		*GetNameSafe(GetInstigator()), *Creature->GetName(), Damage);
+
+	// Then it goes to see who did it: a forced investigation, which waits out the stagger and
+	// overrides a hunt - shooting a raptor off a teammate draws it toward you.
+	if (ADinoAIControllerBase* Brain = Cast<ADinoAIControllerBase>(Creature->GetController()))
+	{
+		Brain->Investigate(LaunchLocation, GetInstigator(), TEXT("being hit by a flare"), /*bForce*/ true);
+	}
 
 	Destroy();
 }

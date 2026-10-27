@@ -66,4 +66,10 @@ private:
 
 	/** Set on the first creature hit, so a flare passing through a capsule and a mesh hits once. */
 	bool bSpent = false;
+
+	/**
+	 * Where it was fired from. A creature it hits goes to look there - where the shot came from,
+	 * not where the shooter has run to since. Server only.
+	 */
+	FVector LaunchLocation = FVector::ZeroVector;
 };

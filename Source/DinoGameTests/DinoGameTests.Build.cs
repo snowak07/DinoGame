@@ -20,6 +20,8 @@ public class DinoGameTests : ModuleRules
 			// The engine's voice sound (UVoipListenerSynthComponent), for the playback-check test.
 			"OnlineSubsystemUtils",
 			"AudioMixer",
+			// IVoiceCapture, which the engine's voice-engine header needs, for the talking-quirk test.
+			"Voice",
 			"DinoGame"
 		});
 	}

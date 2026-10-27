@@ -196,6 +196,27 @@ namespace
 			}
 
 			Add(Out, Brain->IsAcceptableTarget(Target), Name, FString::Printf(TEXT("targeting %s"), *TargetText));
+
+			// Closest visible wins, once the commitment after its last switch has run out (with
+			// half a second for the combat tick to act). Only reported when someone else is in
+			// sight - otherwise there was no choice to get wrong.
+			if (Creature->GetAwareness() == EDinoAwareness::Hunting
+				&& Brain->GetSecondsSinceTargetChange() > Brain->GetTargetSwitchCooldown() + 0.5)
+			{
+				float NearestDistance = 0.0f;
+				const AActor* Nearest = Brain->FindNearestVisibleTarget(Target, &NearestDistance);
+				if (Nearest)
+				{
+					const bool bTargetInSight = Brain->IsInSight(Target);
+					const float TargetDistance = FVector::Dist(Creature->GetActorLocation(), Target->GetActorLocation());
+					const bool bChoseClosest = bTargetInSight && TargetDistance <= NearestDistance;
+					Add(Out, bChoseClosest, FString::Printf(TEXT("Creature hunts the closest: %s"), *Creature->GetName()),
+						FString::Printf(TEXT("hunting %s (%s), while %s is in sight at %.1f m; %.1f s since its last switch"),
+							*Target->GetName(),
+							bTargetInSight ? *FString::Printf(TEXT("%.1f m"), TargetDistance / 100.0f) : TEXT("out of sight"),
+							*Nearest->GetName(), NearestDistance / 100.0f, Brain->GetSecondsSinceTargetChange()));
+				}
+			}
 		}
 	}
 

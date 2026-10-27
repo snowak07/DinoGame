@@ -26,10 +26,13 @@ silently doing nothing.
 ## Build and package
 
 ```
-package.bat            build + cook + package
-package.bat publish    ...and upload to itch
-package.bat deploy     ...and copy to the test PC over the LAN (deploy.bat)
+.\package.bat            build + cook + package
+.\package.bat publish    ...and upload to itch
+.\package.bat deploy     ...and copy to the test PC over the LAN (deploy.bat)
 ```
+
+From PowerShell (the default terminal here) the `.\` is required: PowerShell does not run a
+script from the current folder by bare name, and says `not recognized` instead.
 
 Single target, for a compile check:
 
@@ -208,6 +211,41 @@ spectating, the round end, the Tab menu and, next, voice all read it.
 The new screens (`UDinoSessionMenu`, `UDinoSpectatorOverlay`) are laid out in C++ with
 `WidgetTree->ConstructWidget` — no Blueprint to keep in step. Spectator controls are input
 actions created at runtime in `ADinoSpectatorPawn`, so no input assets either.
+
+---
+
+## Creature senses
+
+Sight is a narrow cone (30° half-angle) and the *confirmation*, not the first warning. Creatures
+mostly find players through what they hear and feel. Every one of those routes ends in
+**`ADinoAIControllerBase::Investigate`**: Searching at a spot, with the player as its target.
+
+| | Where | Notes |
+|---|---|---|
+| Voice | `ADinoPlayerController::SampleOwnSpeech` → `ServerReportSpeech` → `UDinoNoiseSubsystem::ReportVoice` | Measured on the speaker's own machine; the host can't, as it doesn't hear players it muted |
+| Close range | `CheckCloseSense` in the combat tick | 3 m from the body's edge, any direction, blocked by walls |
+| Flare hit | `ADinoFlareProjectile::HandleOverlap` | Forced: waits out the stagger, overrides a hunt |
+
+- **Never use `IOnlineVoice::IsLocalPlayerTalking`: in 5.8.1 it always says no.**
+  `FVoiceEngineImpl` tests the bit `LocalUserNum << 1`, which for player 0 is no bit at all. Use
+  `UDinoVoiceSubsystem::IsLocallyTalking`, fed by the voice system's talking-state event (the one
+  behind the `Trigger Local 0 TALKING` log line). Relying on it was why real voices never alerted
+  a creature while `DinoNoise` did. The test `Voice.Talking.EngineQuirkStillPresent` fails if Epic fixes it.
+- **Noise is not the engine's hearing sense.** `UAISense_Hearing` ignores walls, so
+  `UDinoNoiseSubsystem` traces to each creature and shortens the range itself (`DinoNoiseRules`).
+- **The rules are plain functions** (`DinoTargetRules`, `DinoNoiseRules`), shared by the AI,
+  `DinoSelfCheck` and the unit tests, like `DinoVoiceRules`.
+- **Perception only reports changes.** A player already in view when a creature starts
+  searching sends no new "seen" event, so `AcquireVisibleWhileNotHunting` re-checks every combat
+  tick, and `ReconsiderTarget` re-picks the closest while hunting. Anything that changes what a
+  creature should be looking at can't rely on a perception event arriving.
+- **Investigate needs a valid target.** The search machinery is built around one: who it's looking
+  for, and when it gives up. A noise with no player behind it is ignored.
+- **A hunt is never redirected from `HandlePerceptionUpdated`.** That used to take whoever was
+  noticed last, however far away, and mid-attack it swapped the target out from under a raptor
+  still pinning someone. Switching belongs to `ReconsiderTarget` alone.
+- **`Suspicious` has no StateTree state** (`ST_TRex` has Idle, Hunting, Searching, Attacking), so
+  nothing should set it. Noises go to Searching.
 
 ---
 

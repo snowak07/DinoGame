@@ -76,6 +76,26 @@ public:
 	/** Loudest mic level over the last few seconds, 0-1. Speech is sent once it passes the threshold. */
 	float GetRecentMicPeak() const;
 
+	/**
+	 * Whether this player's voice is being sent right now - their speech is above the threshold
+	 * and going out. From the voice system's talking-state event, the same signal behind its
+	 * "Trigger Local 0 TALKING" log line.
+	 *
+	 * Not IOnlineVoice::IsLocalPlayerTalking: in 5.8.1 that tests the bit (LocalUserNum << 1),
+	 * which for player 0 is no bit at all, so it answers false always
+	 * (FVoiceEngineImpl::IsLocalPlayerTalking). Creatures never heard a real voice because of it.
+	 */
+	bool IsLocallyTalking() const { return bLocallyTalking; }
+
+	/**
+	 * The talking state after one talking-state event: it fires for every speaker, and only one
+	 * naming this machine's own player (LocalId) changes ours. A plain function for the tests.
+	 */
+	static bool NextLocallyTalking(bool bCurrent, const FUniqueNetId& Talker, bool bTalking, const FUniqueNetId* LocalId);
+
+	/** The mic level right now (the latest sample, a tenth of a second old at most), 0-1. */
+	float GetCurrentMicLevel() const { return LevelSamples.IsEmpty() ? 0.0f : LevelSamples.Last().Level; }
+
 	/** The level speech has to reach to be sent, from the current sensitivity. */
 	float GetMicThreshold() const;
 
@@ -130,6 +150,17 @@ private:
 	FString NewMicNeedingRestart;
 
 	bool bStartupNoticesShown = false;
+
+	/** See IsLocallyTalking. */
+	bool bLocallyTalking = false;
+
+	/** The voice interface the talking-state event is bound on; bound again if it is replaced. */
+	TWeakPtr<class IOnlineVoice, ESPMode::ThreadSafe> TalkingBoundTo;
+	FDelegateHandle TalkingHandle;
+
+	/** Binds the talking-state event once a voice interface exists. From the tick. */
+	void BindTalkingState();
+	void HandleTalkingStateChanged(FUniqueNetIdRef Talker, bool bTalking);
 	bool bMissingMicNotified = false;
 	TSet<FString> NewMicsNotified;
 

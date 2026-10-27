@@ -9,6 +9,8 @@
 #include "DinoPlayerState.h"
 #include "Online/DinoVoiceSubsystem.h"
 #include "Online/DinoVoiceTalker.h"
+#include "AI/DinoNoiseRules.h"
+#include "AI/DinoNoiseSubsystem.h"
 #include "DinoSelfCheck.h"
 #include "DinoSpectatorPawn.h"
 #include "GameFramework/GameMode.h"
@@ -50,7 +52,91 @@ void ADinoPlayerController::BeginPlay()
 		{
 			VoiceSettings->ShowStartupNotices();
 		}
+
+		GetWorldTimerManager().SetTimer(SpeechTimer, this, &ADinoPlayerController::SampleOwnSpeech, 0.25f, true);
 	}
+}
+
+void ADinoPlayerController::SampleOwnSpeech()
+{
+	IOnlineSubsystem* Subsystem = IOnlineSubsystem::Get();
+	const IOnlineVoicePtr Voice = Subsystem ? Subsystem->GetVoiceInterface() : nullptr;
+	const UDinoVoiceSubsystem* VoiceSettings = GetGameInstance() ? GetGameInstance()->GetSubsystem<UDinoVoiceSubsystem>() : nullptr;
+
+	// "Talking" is the voice system's own answer: this player's speech is above their threshold
+	// and being sent. Exactly what everyone else hears - and so what a creature should. Read from
+	// UDinoVoiceSubsystem, not IOnlineVoice::IsLocalPlayerTalking, which always says no (see there).
+	const bool bTalking = Voice.IsValid() && VoiceSettings && VoiceSettings->IsLocallyTalking() && Cast<ADinoCharacter>(GetPawn());
+	if (bTalking != bWasReportingSpeech)
+	{
+		bWasReportingSpeech = bTalking;
+		UE_LOG(LogDinoNet, Log, TEXT("Voice noise: %s reporting your voice to the host."), bTalking ? TEXT("started") : TEXT("stopped"));
+	}
+	if (!bTalking)
+	{
+		return;
+	}
+
+	const float Loudness = DinoNoiseRules::VoiceLoudness(VoiceSettings->GetCurrentMicLevel(),
+		VoiceSettings->GetMicThreshold(), UDinoNoiseSubsystem::GetShoutMicLevel());
+	ServerReportSpeech(static_cast<uint8>(FMath::RoundToInt(Loudness * 255.0f)));
+
+	DrawOwnVoiceRings(Loudness);
+}
+
+void ADinoPlayerController::ServerReportSpeech_Implementation(uint8 Loudness)
+{
+	const UWorld* World = GetWorld();
+	if (!World || World->GetTimeSeconds() - LastSpeechReportTime < 0.2)
+	{
+		return;
+	}
+	LastSpeechReportTime = World->GetTimeSeconds();
+
+	// Only a living (or downed) body makes noise. The dead and spectators talk freely.
+	ADinoCharacter* Body = Cast<ADinoCharacter>(GetPawn());
+	const ADinoPlayerState* Speaker = GetPlayerState<ADinoPlayerState>();
+	if (!Body || !Body->IsAlive() || !Speaker || !Speaker->IsAlive())
+	{
+		return;
+	}
+
+	if (UDinoNoiseSubsystem* Noise = World->GetSubsystem<UDinoNoiseSubsystem>())
+	{
+		Noise->ReportVoice(Body->GetPawnViewLocation(), Loudness / 255.0f, Body);
+	}
+}
+
+void ADinoPlayerController::DrawOwnVoiceRings(float Loudness)
+{
+	// The host draws its own; drawing here too would double the rings on the host's screen.
+	const UWorld* World = GetWorld();
+	if (HasAuthority() || !World || !GetPawn() || !UDinoNoiseSubsystem::IsDebugDrawOn()
+		|| !DinoNoiseRules::ShouldDrawVoice(World->GetTimeSeconds(), LastOwnRingTime, LastOwnRingLoudness,
+			Loudness, UDinoNoiseSubsystem::GetDebugDrawSeconds()))
+	{
+		return;
+	}
+
+	LastOwnRingTime = World->GetTimeSeconds();
+	LastOwnRingLoudness = Loudness;
+	UDinoNoiseSubsystem::DrawRangeRings(World, GetPawn(), GetPawn()->GetPawnViewLocation(), Loudness);
+}
+
+void ADinoPlayerController::DinoNoise(float Loudness)
+{
+	const float Clamped = FMath::Clamp(Loudness, 0.0f, 1.0f);
+	if (!Cast<ADinoCharacter>(GetPawn()))
+	{
+		DinoScreenError(TEXT("DinoNoise: you need a living character - start a round first."));
+		return;
+	}
+
+	DinoScreenLog(FString::Printf(TEXT("Noise: as if you spoke at loudness %.2f (carries %.0f m in the open, less through walls)."),
+		Clamped, UDinoNoiseSubsystem::GetOpenRange(Clamped) / 100.0f), FColor(240, 200, 80), 5.0f);
+	ServerReportSpeech(static_cast<uint8>(FMath::RoundToInt(Clamped * 255.0f)));
+
+	DrawOwnVoiceRings(Clamped);
 }
 
 void ADinoPlayerController::ShowBuildVersionOnScreen()

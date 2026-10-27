@@ -121,8 +121,9 @@ if "%PUBLISH%"=="0" (
     echo === DONE ^(not published^) ===
     echo Package: %ARCHIVE%\Windows
     echo Run it with:  "%ARCHIVE%\Windows\DinoGame.exe" -log
-    echo Copy it to the test PC with:  deploy.bat
-    echo Upload it with:  package.bat publish
+    echo Copy it to the test PC with:  .\deploy.bat
+    echo Upload it with:  .\package.bat publish
+    echo ^(From PowerShell the .\ is required; from cmd it is optional.^)
     exit /b 0
 )
 

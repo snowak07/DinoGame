@@ -136,6 +136,21 @@ public:
 	UFUNCTION(Exec)
 	void DinoSelfCheck();
 
+	/**
+	 * Makes a voice-like noise where you stand, as if you spoke at Loudness (0 whisper - 1 shout),
+	 * for testing creature hearing without a mic - Play In Editor has no voice. Goes through the
+	 * same report to the host that real speech does.
+	 */
+	UFUNCTION(Exec)
+	void DinoNoise(float Loudness = 0.5f);
+
+	/**
+	 * Unreliable, up to 4 times a second while this player is sending voice: how loud, 0-255
+	 * (DinoNoiseRules::VoiceLoudness x 255). The host turns it into a noise creatures can hear.
+	 */
+	UFUNCTION(Server, Unreliable)
+	void ServerReportSpeech(uint8 Loudness);
+
 	/** Lists every AI creature with its awareness, target, and last known location. */
 	UFUNCTION(Exec)
 	void DinoAIStatus();
@@ -271,6 +286,25 @@ private:
 
 	/** Server copy - see HearsLivingWhileSpectating. */
 	bool bSpectatorHearsLiving = true;
+
+	/**
+	 * Local, 4 times a second: if this player is sending voice, reports how loud to the host.
+	 * Measured here because only this machine knows - the host does not hear players it has
+	 * muted, and could not judge loudness against this player's own mic threshold.
+	 */
+	void SampleOwnSpeech();
+	FTimerHandle SpeechTimer;
+
+	/** So the log says when reporting starts and stops, rather than four lines a second. */
+	bool bWasReportingSpeech = false;
+
+	/** Client side of the noise debug's throttle - see DinoNoiseRules::ShouldDrawVoice. */
+	void DrawOwnVoiceRings(float Loudness);
+	double LastOwnRingTime = -1.0e9;
+	float LastOwnRingLoudness = 0.0f;
+
+	/** Server: the last accepted speech report, so a misbehaving client cannot flood noises. */
+	double LastSpeechReportTime = -1.0e9;
 
 	/**
 	 * Runs the self-check a few seconds after something changed: long enough for replication

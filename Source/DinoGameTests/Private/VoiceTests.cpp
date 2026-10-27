@@ -9,6 +9,7 @@
 #include "Online/DinoVoiceSubsystem.h"
 #include "Online/DinoVoiceTalker.h"
 #include "VoipListenerSynthComponent.h"
+#include "VoiceEngineImpl.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -233,6 +234,55 @@ bool FDinoHostMuteKeepsTabMuteTest::RunTest(const FString& Parameters)
 
 	TestFalse(TEXT("gameplay reason removed"), EnumHasAnyFlags(ReasonsFor(Host, Speaker), EVoiceBlockReasons::Gameplay));
 	TestTrue(TEXT("the host's own mute stays"), EnumHasAnyFlags(ReasonsFor(Host, Speaker), EVoiceBlockReasons::Muted));
+	return true;
+}
+
+// --- Am I talking? ---------------------------------------------------------------------------
+
+namespace
+{
+	/** The engine's voice engine, reporting that player 0 has voice data ready - bit 0. */
+	class FPlayerZeroHasVoice : public FVoiceEngineImpl
+	{
+	public:
+		FPlayerZeroHasVoice() : FVoiceEngineImpl(nullptr) {}
+		virtual uint32 GetVoiceDataReadyFlags() const override { return 1u << 0; }
+	};
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDinoTalkingQuirkTest, "DinoGame.Voice.Talking.EngineQuirkStillPresent", DinoTestFlags)
+bool FDinoTalkingQuirkTest::RunTest(const FString& Parameters)
+{
+	// Documents why UDinoVoiceSubsystem::IsLocallyTalking exists. FVoiceEngineImpl::IsLocalPlayerTalking
+	// tests (LocalUserNum << 1) - for player 0, no bit at all - so it says false even with voice
+	// ready. Asking it is why creatures never heard a real voice. If this starts failing, the
+	// engine has fixed it.
+	FPlayerZeroHasVoice Engine;
+	TestFalse(TEXT("engine says player 0 is not talking even with their voice data ready"), Engine.IsLocalPlayerTalking(0));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDinoTalkingStateTest, "DinoGame.Voice.Talking.FollowsOnlyThisPlayer", DinoTestFlags)
+bool FDinoTalkingStateTest::RunTest(const FString& Parameters)
+{
+	const FUniqueNetIdRepl Me = FDinoTestWorld::MakeNetId(TEXT("Me"));
+	const FUniqueNetIdRepl Them = FDinoTestWorld::MakeNetId(TEXT("Them"));
+	const FUniqueNetId* Local = Me.GetUniqueNetId().Get();
+
+	bool bTalking = false;
+	bTalking = UDinoVoiceSubsystem::NextLocallyTalking(bTalking, *Them, true, Local);
+	TestFalse(TEXT("someone else talking is not me talking"), bTalking);
+
+	bTalking = UDinoVoiceSubsystem::NextLocallyTalking(bTalking, *Me, true, Local);
+	TestTrue(TEXT("I started talking"), bTalking);
+
+	bTalking = UDinoVoiceSubsystem::NextLocallyTalking(bTalking, *Them, false, Local);
+	TestTrue(TEXT("someone else stopping does not stop me"), bTalking);
+
+	bTalking = UDinoVoiceSubsystem::NextLocallyTalking(bTalking, *Me, false, Local);
+	TestFalse(TEXT("I stopped talking"), bTalking);
+
+	TestFalse(TEXT("no local identity yet: nothing counts"), UDinoVoiceSubsystem::NextLocallyTalking(false, *Me, true, nullptr));
 	return true;
 }
 

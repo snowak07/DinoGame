@@ -29,6 +29,7 @@ counts as the host. With several PIE players, use the server's window.
 | `DinoSetState auto` | yes | Release the lock; perception takes over again |
 | `DinoHitDino [damage]` | yes | Hit the nearest living creature. Damage defaults to 25 |
 | `DinoVisionTest [on\|off]` | yes | Freeze every creature and show, moment to moment, whether it can see you. No argument toggles |
+| `DinoNoise [loudness]` | no | Make a noise where you stand, as if you spoke at that loudness: 0 whisper to 1 shout, default 0.5. Creatures in earshot come to investigate. For testing without a mic (Play In Editor has none) |
 
 `DinoSetState` takes partial names: `unaware`, `sus`, `alert`, `hunt`, `search`, `att`.
 Use `att` rather than `a` — `a` matches **Alerted** first.
@@ -62,6 +63,48 @@ Draws on the host whether or not debug draw is on.
 | Variable | |
 |---|---|
 | `DinoAI.DebugDraw 1` | Debug draw on (`0` off). Same as `DinoAIDebug`, but explicit |
+| `dino.Noise.WhisperRange 500` | How far (cm) the quietest voice carries to a creature. Host |
+| `dino.Noise.ShoutRange 2500` | How far (cm) a shout carries. Host |
+| `dino.Noise.WallFactor 0.5` | How much of a voice's range is left through a wall. Host |
+| `dino.Noise.ShoutMicLevel 0.3` | The mic level that counts as a shout (`DinoVoiceStatus` shows yours). Set on the *speaker's* machine |
+
+| `dino.Noise.Debug 1` | Draw how far voices carry (also on with `DinoAI.DebugDraw`). See below |
+
+The `dino.Noise.*` values are read live, so they can be tuned mid-session from the console.
+
+**Reading the noise draw.** It appears when someone talks or runs `DinoNoise`, and lasts 4.5 s.
+While someone keeps talking, a new drawing appears only if it is louder than the one already
+showing, or once that one has expired, so what is on screen is their loudest recent voice. The
+rings lie on the floor under the speaker; the lines to creatures start at the mouth, where
+hearing is measured from. The host sees everything; a client sees only the rings around its
+own voice.
+
+| Shape | Meaning |
+|---|---|
+| Yellow ring (on the floor) | How far this voice carries in the open |
+| Orange ring (on the floor) | How far it carries through something |
+| Green line to a creature | Clear line, and it heard you |
+| Red line | Clear line, but too far |
+| Orange line ending in a sphere | Blocked there, by the named actor. Grey from there on to the creature's eyes |
+| Text over a creature | `HEARD` or `too far`, its distance / the range that applied |
+
+The log line `Noise: ... heard by [...]` names the blocker for every muffled creature, so a
+session can be reviewed afterwards without the draw.
+
+### How creatures find you
+
+| | |
+|---|---|
+| **Sight** | A 60° cone (30° each side), 40 m. Seeing you is what starts a hunt |
+| **Up close** | Within 3 m of its body, in any direction but not through walls, it notices you and comes to look |
+| **Your voice** | While you talk, creatures in earshot come to look where you were. A whisper carries ~5 m, a shout ~25 m, half that through walls. Only the living make noise |
+| **A flare hit** | It staggers, then goes to where the shot came from. For 3 s it can only lock on to the shooter, so shooting a raptor off a teammate draws it to you |
+
+"Comes to look" is Searching, not Hunting: it knows where to look, not where you are.
+
+While hunting, a creature goes after whoever it can see who is closest, and after switching sticks
+with the new target for 2 s. A sound never pulls it off the player it is chasing, and nothing
+does mid-attack. But if the player it is chasing is out of sight and talks, it hears where they are.
 
 ### Reading the debug draw
 
@@ -70,8 +113,10 @@ Draws on the host whether or not debug draw is on.
 | Capsule colour | Awareness: grey Unaware, yellow Suspicious, orange Alerted, red Hunting, blue Searching, **white Attacking** |
 | Arrow | Which way the body faces |
 | Cyan sphere + line | Where it sees from, and where it is looking |
-| Coloured sphere + line | Where it is walking to right now |
-| Small grey sphere | The next search point, already chosen |
+| Coloured sphere + line (searching) | Where it is walking to right now |
+| Small grey sphere (searching) | The next search point, already chosen |
+| Thick red line (hunting) | To the player it is chasing, while it can see them |
+| Red sphere + thin line (hunting) | Where it last saw them, while the hunt holds on without sight |
 | Magenta sphere + circle | Search centre and current search radius |
 | Yellow sphere | Where it predicts you went |
 | Grey sphere + circle (idle) | Home, and how far it wanders from it |

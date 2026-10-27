@@ -383,20 +383,42 @@ void ADinoCreature::DrawStateDebug()
 			return !P.ContainsNaN() && P.GetAbsMax() < 1.0e9f && !P.IsNearlyZero();
 		};
 
-		// Where it is going: solid sphere, plus a line so the direction is unambiguous.
-		const FVector Active = AI->GetActiveSearchDestination();
-		if (IsDrawable(Active))
+		// Search markers only while searching. The search destination and next point are never
+		// cleared when a search ends, so drawn in every state they sat wherever the last search
+		// leg or investigation had pointed - in the hunting colour, looking like a hunt target
+		// far from the player actually being chased.
+		if (Awareness == EDinoAwareness::Searching)
 		{
-			DrawDebugSphere(World, Active, 80.0f, 12, Colour, false, DebugDrawLifetime, 0, 3.0f);
-			DrawDebugLine(World, GetActorLocation(), Active, Colour, false, DebugDrawLifetime, 0, 2.0f);
-		}
+			// Where it is going: solid sphere, plus a line so the direction is unambiguous.
+			const FVector Active = AI->GetActiveSearchDestination();
+			if (IsDrawable(Active))
+			{
+				DrawDebugSphere(World, Active, 80.0f, 12, Colour, false, DebugDrawLifetime, 0, 3.0f);
+				DrawDebugLine(World, GetActorLocation(), Active, Colour, false, DebugDrawLifetime, 0, 2.0f);
+			}
 
-		// Where it will go next: smaller and grey, so the prefetch is visible as a queued
-		// candidate rather than mistaken for the current destination.
-		const FVector Next = AI->GetNextSearchPoint();
-		if (IsDrawable(Next) && !Next.Equals(Active, 1.0f))
+			// Where it will go next: smaller and grey, so the prefetch is visible as a queued
+			// candidate rather than mistaken for the current destination.
+			const FVector Next = AI->GetNextSearchPoint();
+			if (IsDrawable(Next) && !Next.Equals(Active, 1.0f))
+			{
+				DrawDebugSphere(World, Next, 40.0f, 8, FColor(110, 110, 110), false, DebugDrawLifetime, 0, 1.5f);
+			}
+		}
+		else if (Awareness == EDinoAwareness::Hunting && AI->GetCurrentTarget())
 		{
-			DrawDebugSphere(World, Next, 40.0f, 8, FColor(110, 110, 110), false, DebugDrawLifetime, 0, 1.5f);
+			// What the chase is actually after: the target itself while it is seen (solid line),
+			// or where it was last seen during the few seconds the hunt persists without sight
+			// (thin line to a sphere) - the point it is running to.
+			if (AI->HasLiveContact())
+			{
+				DrawDebugLine(World, GetActorLocation(), AI->GetCurrentTarget()->GetActorLocation(), Colour, false, DebugDrawLifetime, 0, 3.0f);
+			}
+			else if (IsDrawable(AI->GetLastKnownLocation()))
+			{
+				DrawDebugSphere(World, AI->GetLastKnownLocation(), 60.0f, 12, Colour, false, DebugDrawLifetime, 0, 2.0f);
+				DrawDebugLine(World, GetActorLocation(), AI->GetLastKnownLocation(), Colour, false, DebugDrawLifetime, 0, 1.0f);
+			}
 		}
 
 		// What the search is centred on, and how wide it currently is.

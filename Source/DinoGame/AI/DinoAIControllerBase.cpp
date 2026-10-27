@@ -1,5 +1,7 @@
 ﻿#include "AI/DinoAIControllerBase.h"
 
+#include "AI/DinoTargetRules.h"
+
 #include "AI/DinoAttackComponent.h"
 #include "AI/DinoCreature.h"
 #include "AI/DinoIdleComponent.h"
@@ -236,6 +238,33 @@ void ADinoAIControllerBase::HandlePerceptionUpdated(AActor* Actor, FAIStimulus S
 
 	if (Stimulus.WasSuccessfullySensed())
 	{
+		// A hunt or an attack in progress is never redirected from here. A sound never redirects
+		// it at all; a sighting of someone else is ReconsiderTarget's call, which applies "closest
+		// wins" and the switch cooldown. Acquiring here took whoever was noticed last, however far
+		// away - and mid-attack swapped the target out from under a raptor still pinning someone.
+		const EDinoAwareness Awareness = GetAwareness();
+		const bool bCommitted = Awareness == EDinoAwareness::Hunting || IsEngagedInAttack();
+		if (bCommitted && (!bBySight || Actor != CurrentTarget))
+		{
+			UE_LOG(LogDinoGame, Verbose, TEXT("%s noticed %s by %s while %s; not redirecting."), *GetName(),
+				*Actor->GetName(), bBySight ? TEXT("sight") : TEXT("sound"), *DinoAwarenessName(Awareness));
+			return;
+		}
+
+		if (!bBySight)
+		{
+			// A noise is a direction, not an identification. Suspicious had no StateTree state, so
+			// a heard player used to leave the creature standing; searching is the behaviour.
+			Investigate(IsUsableWorldLocation(Stimulus.StimulusLocation) ? Stimulus.StimulusLocation : Actor->GetActorLocation(),
+				Actor, TEXT("heard"));
+			return;
+		}
+
+		if (GetWorld()->GetTimeSeconds() < ForcedInvestigationUntil && Actor != ForcedInvestigationSource.Get())
+		{
+			return; // just shot: see ForcedInvestigationCommitSeconds
+		}
+
 		AcquireTarget(Actor, Stimulus.StimulusLocation, bBySight);
 		return;
 	}
@@ -307,6 +336,10 @@ void ADinoAIControllerBase::HandlePerceptionUpdated(AActor* Actor, FAIStimulus S
 void ADinoAIControllerBase::AcquireTarget(AActor* Actor, const FVector& SensedLocation, bool bBySight)
 {
 	const bool bIsNewEncounter = CurrentTarget != Actor;
+	if (bIsNewEncounter)
+	{
+		LastTargetChangeTime = GetWorld()->GetTimeSeconds();
+	}
 
 	CurrentTarget = Actor;
 	LastKnownLocation = IsUsableWorldLocation(SensedLocation)
@@ -327,9 +360,17 @@ void ADinoAIControllerBase::AcquireTarget(AActor* Actor, const FVector& SensedLo
 		SetFocus(Actor);
 	}
 
-	// A noise is a direction, not an identification: it should make a creature curious,
-	// not omniscient. Only sight escalates to a confirmed hunt.
-	SetAwareness(bBySight ? EDinoAwareness::Hunting : EDinoAwareness::Suspicious);
+	// Only sight acquires a target. A noise is a direction, not an identification, and goes
+	// through Investigate instead; Suspicious, which this used to set for one, has no StateTree
+	// state and left the creature standing.
+	if (!bBySight)
+	{
+		UE_LOG(LogDinoGame, Warning, TEXT("%s: AcquireTarget called for something not seen (%s) - use Investigate. Searching instead."),
+			*GetName(), *GetNameSafe(Actor));
+		Investigate(LastKnownLocation, Actor, TEXT("a non-sight acquisition"));
+		return;
+	}
+	SetAwareness(EDinoAwareness::Hunting);
 
 	if (bIsNewEncounter)
 	{
@@ -531,12 +572,287 @@ void ADinoAIControllerBase::TickCombat()
 
 	// Under a debug lock the StateTree task drives attacks instead, so a forced state is not
 	// fought by the normal triggers.
-	if (!AttackComponent || bAwarenessLocked)
+	if (bAwarenessLocked)
+	{
+		return;
+	}
+
+	// Before the attack check, so an attack this tick goes for whoever is now closest.
+	AcquireVisibleWhileNotHunting();
+	ReconsiderTarget();
+	CheckCloseSense();
+
+	if (!AttackComponent)
 	{
 		return;
 	}
 
 	AttackComponent->TryStartAttack(false);
+}
+
+void ADinoAIControllerBase::ReconsiderTarget()
+{
+	if (GetAwareness() != EDinoAwareness::Hunting || !CurrentTarget || IsEngagedInAttack())
+	{
+		return;
+	}
+
+	float CandidateDistance = 0.0f;
+	AActor* Candidate = FindNearestVisibleTarget(CurrentTarget, &CandidateDistance);
+	if (!Candidate)
+	{
+		return;
+	}
+
+	const APawn* Self = GetPawn();
+	const bool bCurrentInSight = IsInSight(CurrentTarget);
+	const float CurrentDistance = bCurrentInSight && Self
+		? FVector::Dist(Self->GetActorLocation(), CurrentTarget->GetActorLocation())
+		: DinoTargetRules::NotInSight;
+
+	if (!DinoTargetRules::ShouldSwitchTarget(CurrentDistance, CandidateDistance,
+		GetSecondsSinceTargetChange(), TargetSwitchCooldown, IsEngagedInAttack()))
+	{
+		return;
+	}
+
+	UE_LOG(LogDinoGame, Log, TEXT("%s switching target %s (%s) -> %s (%.1f m): %s."), *GetName(),
+		*GetNameSafe(CurrentTarget),
+		bCurrentInSight ? *FString::Printf(TEXT("%.1f m"), CurrentDistance / 100.0f) : TEXT("out of sight"),
+		*Candidate->GetName(), CandidateDistance / 100.0f,
+		bCurrentInSight ? TEXT("closer") : TEXT("current target out of sight"));
+
+	AcquireTarget(Candidate, Candidate->GetActorLocation(), true);
+}
+
+void ADinoAIControllerBase::AcquireVisibleWhileNotHunting()
+{
+	const EDinoAwareness Awareness = GetAwareness();
+	if (IsEngagedInAttack() || (Awareness != EDinoAwareness::Unaware && Awareness != EDinoAwareness::Searching))
+	{
+		return;
+	}
+
+	AActor* Nearest = nullptr;
+	const UWorld* World = GetWorld();
+	if (World && World->GetTimeSeconds() < ForcedInvestigationUntil)
+	{
+		// Just shot: only the shooter can pull it out of the investigation.
+		AActor* Shooter = ForcedInvestigationSource.Get();
+		Nearest = IsValidTarget(Shooter) && IsInSight(Shooter) ? Shooter : nullptr;
+	}
+	else
+	{
+		Nearest = FindNearestVisibleTarget();
+	}
+
+	if (Nearest)
+	{
+		UE_LOG(LogDinoGame, Log, TEXT("%s spotted %s while %s."), *GetName(), *Nearest->GetName(), *DinoAwarenessName(Awareness));
+		AcquireTarget(Nearest, Nearest->GetActorLocation(), true);
+	}
+}
+
+bool ADinoAIControllerBase::CanReactToVoice(const AActor* /*Speaker*/, double Now, double Interval)
+{
+	if (Now - LastVoiceReactionTime < Interval)
+	{
+		return false;
+	}
+	LastVoiceReactionTime = Now;
+	return true;
+}
+
+bool ADinoAIControllerBase::Investigate(const FVector& Location, AActor* Source, const TCHAR* Reason, bool bForce)
+{
+	const APawn* Self = GetPawn();
+	UWorld* World = GetWorld();
+	if (!HasAuthority() || !Self || !World || bVisionTest || bAwarenessLocked || IsCreatureDead())
+	{
+		return false;
+	}
+
+	// The search machinery is built around a target - who it is looking for, and when to give up.
+	if (!IsValidTarget(Source))
+	{
+		UE_LOG(LogDinoGame, Log, TEXT("%s ignored %s near %s: %s is not a valid target."), *GetName(), Reason,
+			*Location.ToCompactString(), *GetNameSafe(Source));
+		return false;
+	}
+
+	const EDinoAwareness Awareness = GetAwareness();
+
+	if (bForce && IsEngagedInAttack())
+	{
+		bHasPendingForcedInvestigation = true;
+		PendingInvestigationLocation = Location;
+		PendingInvestigationSource = Source;
+		PendingInvestigationReason = Reason;
+		UE_LOG(LogDinoGame, Log, TEXT("%s will investigate %s near %s (%s) once its attack ends."), *GetName(), Reason,
+			*Location.ToCompactString(), *GetNameSafe(Source));
+		return true;
+	}
+
+	if (!bForce && !DinoTargetRules::ShouldInvestigate(Awareness == EDinoAwareness::Hunting, IsEngagedInAttack()))
+	{
+		// Its target, out of sight, giving themselves away: where to look, not a new hunt.
+		if (Awareness == EDinoAwareness::Hunting && Source == CurrentTarget && !bHasLiveContact)
+		{
+			LastKnownLocation = Location;
+			UE_LOG(LogDinoGame, Log, TEXT("%s heard its target %s (%s) out of sight; last known now %s."),
+				*GetName(), *GetNameSafe(Source), Reason, *Location.ToCompactString());
+			return false;
+		}
+
+		if (World->GetTimeSeconds() - LastIgnoredLogTime >= 5.0)
+		{
+			LastIgnoredLogTime = World->GetTimeSeconds();
+			UE_LOG(LogDinoGame, Log, TEXT("%s ignored %s near %s (%s): already %s (logged at most every 5 s)."), *GetName(), Reason,
+				*Location.ToCompactString(), *GetNameSafe(Source), *DinoAwarenessName(Awareness));
+		}
+		return false;
+	}
+
+	if (CurrentTarget != Source)
+	{
+		LastTargetChangeTime = GetWorld()->GetTimeSeconds();
+	}
+	CurrentTarget = Source;
+	bHasLiveContact = false;
+	LastKnownLocation = Location;
+
+	// "Further along the line from me to the sound" - the same guess BeginSearching makes for a
+	// target that vanished standing still. A sound has no heading of its own.
+	LastKnownDirection = (Location - Self->GetActorLocation()).GetSafeNormal2D();
+
+	NextSearchPoint = Location;
+	NextPointSource = TEXT("investigate");
+	bInvestigatePointPending = true;
+
+	GetWorldTimerManager().ClearTimer(LostSightTimer);
+	ClearFocus(EAIFocusPriority::Gameplay);
+
+	const bool bWasSearching = Awareness == EDinoAwareness::Searching;
+	LegsThisSearch = 0;
+	bHasPendingForcedInvestigation = false;
+	if (bForce)
+	{
+		ForcedInvestigationUntil = World->GetTimeSeconds() + ForcedInvestigationCommitSeconds;
+		ForcedInvestigationSource = Source;
+	}
+	SetAwareness(EDinoAwareness::Searching);
+
+	// Already searching: the current leg is walking somewhere that no longer matters. Stopping it
+	// ends the leg, and the loop starts the next one - to NextSearchPoint - straight away.
+	if (bWasSearching)
+	{
+		StopMovement();
+	}
+
+	GetWorldTimerManager().SetTimer(MemoryTimer, this, &ADinoAIControllerBase::ForgetTarget, MemoryDuration, false);
+
+	UE_LOG(LogDinoGame, Log, TEXT("%s investigating %s near %s (%s, %.1f m away)%s%s."), *GetName(), Reason,
+		*Location.ToCompactString(), *GetNameSafe(Source), FVector::Dist(Self->GetActorLocation(), Location) / 100.0f,
+		bWasSearching ? TEXT(", redirecting its search") : TEXT(""),
+		bForce && Awareness == EDinoAwareness::Hunting ? TEXT(", breaking off its hunt") : TEXT(""));
+	return true;
+}
+
+void ADinoAIControllerBase::CheckCloseSense()
+{
+	const ACharacter* Self = Cast<ACharacter>(GetPawn());
+	const UWorld* World = GetWorld();
+	if (!Self || !World || CloseSenseRadius <= 0.0f || IsEngagedInAttack()
+		|| GetAwareness() == EDinoAwareness::Hunting
+		|| World->GetTimeSeconds() - LastCloseSenseTime < CloseSenseInterval)
+	{
+		return;
+	}
+
+	const float SelfRadius = Self->GetCapsuleComponent() ? Self->GetCapsuleComponent()->GetScaledCapsuleRadius() : 0.0f;
+	FVector EyeLocation;
+	FRotator EyeRotation;
+	Self->GetActorEyesViewPoint(EyeLocation, EyeRotation);
+
+	for (TActorIterator<ADinoCharacter> It(World); It; ++It)
+	{
+		ADinoCharacter* Player = *It;
+		if (!IsValidTarget(Player))
+		{
+			continue;
+		}
+
+		const float PlayerRadius = Player->GetCapsuleComponent() ? Player->GetCapsuleComponent()->GetScaledCapsuleRadius() : 0.0f;
+		const float EdgeDistance = FVector::Dist2D(Self->GetActorLocation(), Player->GetActorLocation()) - SelfRadius - PlayerRadius;
+		if (EdgeDistance > CloseSenseRadius)
+		{
+			continue;
+		}
+
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(DinoCloseSense), false, Self);
+		Params.AddIgnoredActor(Player);
+		const bool bBlocked = World->LineTraceTestByChannel(EyeLocation, Player->GetActorLocation(), ECC_Visibility, Params);
+
+		if (DinoTargetRules::IsWithinCloseSense(EdgeDistance, CloseSenseRadius, bBlocked))
+		{
+			LastCloseSenseTime = World->GetTimeSeconds();
+			UE_LOG(LogDinoGame, Log, TEXT("%s sensed %s up close (%.1f m)."), *GetName(), *Player->GetName(), EdgeDistance / 100.0f);
+			Investigate(Player->GetActorLocation(), Player, TEXT("a player up close"));
+			return;
+		}
+	}
+}
+
+AActor* ADinoAIControllerBase::FindNearestVisibleTarget(const AActor* Exclude, float* OutDistance) const
+{
+	const APawn* Self = GetPawn();
+	if (!Perception || !Self)
+	{
+		return nullptr;
+	}
+
+	TArray<AActor*> InSight;
+	Perception->GetCurrentlyPerceivedActors(UAISense_Sight::StaticClass(), InSight);
+
+	AActor* Nearest = nullptr;
+	float NearestDistance = TNumericLimits<float>::Max();
+	for (AActor* Candidate : InSight)
+	{
+		if (Candidate == Exclude || !IsValidTarget(Candidate))
+		{
+			continue;
+		}
+
+		const float Distance = FVector::Dist(Self->GetActorLocation(), Candidate->GetActorLocation());
+		if (Distance < NearestDistance)
+		{
+			NearestDistance = Distance;
+			Nearest = Candidate;
+		}
+	}
+
+	if (OutDistance)
+	{
+		*OutDistance = Nearest ? NearestDistance : 0.0f;
+	}
+	return Nearest;
+}
+
+bool ADinoAIControllerBase::IsInSight(const AActor* Actor) const
+{
+	if (!Perception || !Actor)
+	{
+		return false;
+	}
+
+	TArray<AActor*> InSight;
+	Perception->GetCurrentlyPerceivedActors(UAISense_Sight::StaticClass(), InSight);
+	return InSight.Contains(Actor);
+}
+
+double ADinoAIControllerBase::GetSecondsSinceTargetChange() const
+{
+	return GetWorld() ? GetWorld()->GetTimeSeconds() - LastTargetChangeTime : 0.0;
 }
 
 void ADinoAIControllerBase::HandleAttackBegan(ADinoCharacter* Victim)
@@ -545,6 +861,10 @@ void ADinoAIControllerBase::HandleAttackBegan(ADinoCharacter* Victim)
 	// creature was chasing before - a devour can catch someone it had not even noticed.
 	if (Victim)
 	{
+		if (CurrentTarget != Victim)
+		{
+			LastTargetChangeTime = GetWorld()->GetTimeSeconds();
+		}
 		CurrentTarget = Victim;
 		LastKnownLocation = Victim->GetActorLocation();
 
@@ -572,6 +892,16 @@ void ADinoAIControllerBase::HandleAttackFinished(EDinoAttackOutcome Outcome)
 	if (IsCreatureDead() || bAwarenessLocked || bVisionTest)
 	{
 		return;
+	}
+
+	// Shot mid-attack: carry the shot out now, ahead of going back to whoever it was attacking.
+	if (bHasPendingForcedInvestigation)
+	{
+		bHasPendingForcedInvestigation = false;
+		if (Investigate(PendingInvestigationLocation, PendingInvestigationSource.Get(), *PendingInvestigationReason, true))
+		{
+			return;
+		}
 	}
 
 	if (CurrentTarget && !IsValidTarget(CurrentTarget))
@@ -625,33 +955,7 @@ void ADinoAIControllerBase::DropCurrentTarget(const TCHAR* Reason)
 
 bool ADinoAIControllerBase::TryAcquireVisibleTarget()
 {
-	const APawn* Self = GetPawn();
-	if (!Perception || !Self)
-	{
-		return false;
-	}
-
-	TArray<AActor*> InSight;
-	Perception->GetCurrentlyPerceivedActors(UAISense_Sight::StaticClass(), InSight);
-
-	AActor* Nearest = nullptr;
-	float NearestDistance = TNumericLimits<float>::Max();
-
-	for (AActor* Candidate : InSight)
-	{
-		if (!IsValidTarget(Candidate))
-		{
-			continue;
-		}
-
-		const float Distance = FVector::DistSquared(Self->GetActorLocation(), Candidate->GetActorLocation());
-		if (Distance < NearestDistance)
-		{
-			NearestDistance = Distance;
-			Nearest = Candidate;
-		}
-	}
-
+	AActor* Nearest = FindNearestVisibleTarget();
 	if (!Nearest)
 	{
 		return false;
@@ -744,29 +1048,7 @@ void ADinoAIControllerBase::SetVisionTest(bool bEnable)
 
 void ADinoAIControllerBase::RefreshVisionTest()
 {
-	const APawn* Self = GetPawn();
-	TArray<AActor*> InSight;
-	if (Perception && Self)
-	{
-		Perception->GetCurrentlyPerceivedActors(UAISense_Sight::StaticClass(), InSight);
-	}
-
-	AActor* Nearest = nullptr;
-	float NearestDistance = TNumericLimits<float>::Max();
-	for (AActor* Candidate : InSight)
-	{
-		if (!IsValidTarget(Candidate))
-		{
-			continue;
-		}
-
-		const float Distance = FVector::DistSquared(Self->GetActorLocation(), Candidate->GetActorLocation());
-		if (Distance < NearestDistance)
-		{
-			NearestDistance = Distance;
-			Nearest = Candidate;
-		}
-	}
+	AActor* Nearest = FindNearestVisibleTarget();
 
 	CurrentTarget = Nearest;
 	bHasLiveContact = Nearest != nullptr;
@@ -1109,6 +1391,12 @@ void ADinoAIControllerBase::OnSearchQueryFinished(TSharedPtr<FEnvQueryResult> Re
 			}
 
 			LastQueryOutcome = FString::Printf(TEXT("ok (%d/%d kept)"), KeptItems, Result->Items.Num());
+			if (bInvestigatePointPending)
+			{
+				// Asked before the noise; the investigated spot comes first.
+				LastQueryOutcome += TEXT(", ignored for a pending investigation");
+				return;
+			}
 			NextSearchPoint = Point;
 			NextPointSource = TEXT("eqs");
 			return;
@@ -1159,9 +1447,9 @@ void ADinoAIControllerBase::OnSearchQueryFinished(TSharedPtr<FEnvQueryResult> Re
 	}
 
 	// A query that returns nothing is normal, not an error: every candidate may have been
-	// filtered out. Wander instead of freezing.
+	// filtered out. Wander instead of freezing - unless an investigated spot is waiting.
 	FVector Fallback;
-	if (PickFallbackSearchPoint(Fallback))
+	if (!bInvestigatePointPending && PickFallbackSearchPoint(Fallback))
 	{
 		NextSearchPoint = Fallback;
 	}
@@ -1412,6 +1700,9 @@ void ADinoAIControllerBase::SetActiveSearchDestination(const FVector& Destinatio
 {
 	ActiveSearchDestination = Destination;
 	ActivePointSource = NextPointSource;
+
+	// The leg now walking to the investigated spot has taken it; the next pick is ordinary again.
+	bInvestigatePointPending = false;
 
 	if (ActivePointSource == TEXT("eqs"))
 	{
