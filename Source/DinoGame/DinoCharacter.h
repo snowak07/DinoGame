@@ -4,6 +4,7 @@
 #include "DinoCombatTypes.h"
 #include "Engine/Attenuation.h"
 #include "GameFramework/Character.h"
+#include "Perception/AISightTargetInterface.h"
 #include "DinoCharacter.generated.h"
 
 class ADinoCreature;
@@ -26,12 +27,33 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FDinoDied);
  * RemoteViewPitch16 and exposes it through GetBaseAimRotation().
  */
 UCLASS()
-class DINOGAME_API ADinoCharacter : public ACharacter
+class DINOGAME_API ADinoCharacter : public ACharacter, public IAISightTargetInterface
 {
 	GENERATED_BODY()
 
 public:
 	ADinoCharacter();
+
+	/**
+	 * How creatures' sight tests this player. Crouched, they are seen only within
+	 * dino.Stealth.CrouchSightFactor of a creature's sight range; otherwise - and within that -
+	 * exactly the engine's own test: one line from the creature's eyes to this capsule's centre,
+	 * on the AI system's sight channel, clear or blocked only by this player's own parts.
+	 *
+	 * Implementing the hook means the engine asks this and nothing else for players, so the line
+	 * test cannot be skipped: answering "undefined" is not handed back to the default.
+	 */
+	virtual UAISense_Sight::EVisibilityResult CanBeSeenFrom(const FCanBeSeenFromContext& Context, FVector& OutSeenLocation,
+		int32& OutNumberOfLoSChecksPerformed, int32& OutNumberOfAsyncLosCheckRequested, float& OutSightStrength,
+		int32* UserData = nullptr, const FOnPendingVisibilityQueryProcessedDelegate* Delegate = nullptr) override;
+
+	virtual void Tick(float DeltaSeconds) override;
+
+	/** Server: landing from a jump or a fall is a noise (dino.Noise.LandingRange). */
+	virtual void Landed(const FHitResult& Hit) override;
+
+	/** Ticks only for the locally controlled player, whose crouch view is the only per-frame work here. */
+	virtual void NotifyControllerChanged() override;
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	virtual float TakeDamage(float Damage, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
@@ -245,6 +267,14 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Health", meta = (ClampMin = "1.0"))
 	float MaxHealth = 100.0f;
 
+	/** Eye height above the floor while crouched, cm. The camera eases down to it. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Crouch", meta = (ClampMin = "20.0"))
+	float CrouchedViewHeight = 100.0f;
+
+	/** How quickly the view eases down and back up. Higher is snappier. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Crouch", meta = (ClampMin = "0.5"))
+	float CrouchViewSpeed = 10.0f;
+
 	UPROPERTY(ReplicatedUsing = OnRep_CurrentHealth, BlueprintReadOnly, Category = "Dino|Health")
 	float CurrentHealth = 100.0f;
 
@@ -283,6 +313,32 @@ private:
 	UPrimitiveComponent* FindFirstPersonMesh() const;
 
 	bool bPinnedPoseApplied = false;
+
+	// --- Crouch view ---------------------------------------------------------------------------
+	// The camera rides the first-person arms, and on a crouch the engine keeps those where they
+	// were - it moves the body up as the capsule shrinks, so the feet stay on the ground. Without
+	// a crouch animation to move the head, the view never dropped. These ease the arms down
+	// instead, locally; the pinned pose owns the arms while it is applied.
+
+	/** On crouching: how far down the view should go, measured from where the camera is now. */
+	void BeginCrouchView();
+
+	/** Every frame, locally: eases the arms toward the wanted drop. */
+	void UpdateCrouchView(float DeltaSeconds);
+
+	float CrouchViewDrop = 0.0f;
+	float CrouchViewDropTarget = 0.0f;
+	FVector ArmsStandingLocation = FVector::ZeroVector;
+	bool bHaveArmsStandingLocation = false;
+
+	// --- Footsteps -----------------------------------------------------------------------------
+
+	/** Server, a few times a second: walking makes noise (DinoNoiseRules::FootstepRange). */
+	void ReportFootsteps();
+	FTimerHandle FootstepTimer;
+
+	/** The last footstep range reported, so the log says when it changes, not every step. */
+	float LastFootstepRange = -1.0f;
 	TWeakObjectPtr<UPrimitiveComponent> PosedFirstPersonMesh;
 	FTransform SavedFirstPersonMeshTransform;
 

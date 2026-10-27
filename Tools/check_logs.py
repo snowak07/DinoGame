@@ -88,6 +88,7 @@ class LogReport:
         self.warnings = Counter()
         self.error_total = 0
         self.warning_total = 0
+        self.dino_errors = []        # (time, message): errors our own code logged - always a problem
         self.restarts = []           # times a seamless travel (round restart, back to lobby) began
         self.reached_round = False   # a round actually started on this machine
         self.voices_released = []    # (time, count) at each map change and shutdown, from the cleanup log
@@ -207,6 +208,10 @@ class LogReport:
             self.error_total += 1
             if not any(noise in message for noise in KNOWN_NOISE):
                 self.errors[f"{category}: {normalise(message)}"] += 1
+            # Our code logs Error only for something it believes is wrong. An engine error can be
+            # noise; one of ours never is, so it is judged rather than just counted.
+            if category.startswith("LogDino"):
+                self.dino_errors.append((when, message.strip()[:200]))
         elif verbosity == "Warning":
             self.warning_total += 1
             if not any(noise in message for noise in KNOWN_NOISE) and "DinoSelfCheck" not in message:
@@ -226,6 +231,8 @@ class LogReport:
             found.append(f"{len(self.crashes)} crash(es)")
         if self.ensures:
             found.append(f"{len(self.ensures)} ensure(s)")
+        if self.dino_errors:
+            found.append(f"{len(self.dino_errors)} error(s) from our own code")
         if self.selfcheck_fails:
             found.append(f"{sum(self.selfcheck_fails.values())} self-check failure(s)")
         unexplained = [t for t in self.disconnects if t not in self.explained]
@@ -292,6 +299,9 @@ class LogReport:
             print("  self-check : never ran (older build, or never reached a match)")
         for name, count in self.selfcheck_fails.most_common():
             print(f"    FAIL x{count}  {name}")
+
+        for when, message in self.dino_errors:
+            print(f"  OUR ERROR  : {when:%H:%M:%S}  {message}")
 
         for when in self.disconnects:
             why = self.explained.get(when)
@@ -480,6 +490,10 @@ def self_test():
     expect("no live voice at any restart is not exercised", silent.restart_voice_coverage()[0] is False)
     expect("...and is reported as a coverage gap", len(coverage_gaps([silent])) == 1)
     expect("...but is not a failure", attention == [])
+
+    (ours,), attention = run(("A", "dino_error.log"))
+    expect("finds an error our own code logged", len(ours.dino_errors) == 1)
+    expect("an error from our own code needs attention", any("our own code" in a for a in attention))
 
     (drifted,), attention = run(("A", "format_drift.log"))
     expect("notices markers its parsing missed", "ensure" in drifted.parser_misses())

@@ -1,0 +1,4 @@
+﻿Log file open, 10/26/26 21:40:12
+[2026.10.27-02.40.16:130][  0]LogDinoGame: Build version: 16b2ad0-dirty
+[2026.10.27-02.45.33:962][166]LogDinoGame: Error: BP_RaptorAIController_C_2147480364: search legs are restarting instantly (20 in a row). The destination is almost certainly inside the acceptance radius, so every move completes on arrival. Check goal= in DinoAIStatus against the creature's own position.
+[2026.10.27-02.45.58:264][398]Log file closed, 10/26/26 21:45:58

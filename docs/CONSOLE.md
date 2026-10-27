@@ -67,6 +67,10 @@ Draws on the host whether or not debug draw is on.
 | `dino.Noise.ShoutRange 2500` | How far (cm) a shout carries. Host |
 | `dino.Noise.WallFactor 0.5` | How much of a voice's range is left through a wall. Host |
 | `dino.Noise.ShoutMicLevel 0.3` | The mic level that counts as a shout (`DinoVoiceStatus` shows yours). Set on the *speaker's* machine |
+| `dino.Noise.FootstepRange 600` | How far (cm) walking at full speed carries. Slower is quieter; crouch-walking is silent. Host |
+| `dino.Noise.LandingRange 1000` | How far (cm) landing from a jump or a fall carries. Host |
+| `dino.Stealth.CrouchSightFactor 0.6` | A crouched player is seen only within this fraction of a creature's sight range. Host |
+| `dino.Stealth.CrouchCloseSenseFactor 0.5` | A crouched player is felt only within this fraction of the 3 m close sense. Host |
 
 | `dino.Noise.Debug 1` | Draw how far voices carry (also on with `DinoAI.DebugDraw`). See below |
 
@@ -95,8 +99,9 @@ session can be reviewed afterwards without the draw.
 
 | | |
 |---|---|
-| **Sight** | A 60° cone (30° each side), 40 m. Seeing you is what starts a hunt |
-| **Up close** | Within 3 m of its body, in any direction but not through walls, it notices you and comes to look |
+| **Sight** | A 60° cone (30° each side), 40 m; **24 m if you are crouched**. Seeing you is what starts a hunt |
+| **Up close** | Within 3 m of its body (**1.5 m crouched**), in any direction but not through walls, it notices you and comes to look |
+| **Your footsteps** | Walking carries up to ~6 m, less when moving slowly. **Crouch-walking is silent.** Landing from a jump carries ~10 m |
 | **Your voice** | While you talk, creatures in earshot come to look where you were. A whisper carries ~5 m, a shout ~25 m, half that through walls. Only the living make noise |
 | **A flare hit** | It staggers, then goes to where the shot came from. For 3 s it can only lock on to the shooter, so shooting a raptor off a teammate draws it to you |
 
@@ -194,7 +199,7 @@ thing to do in any solo test.
 | Input | |
 |---|---|
 | **LMB** (right trigger) | Fire a flare, at most once every 1.5 s. Knocks a raptor off a pinned player |
-| **Left Ctrl** (hold) / **C** (toggle, right stick click) | Crouch |
+| **Left Ctrl** (hold) / **C** (toggle, right stick click) | Crouch: lowers your view, silences your footsteps, and makes you harder to see and feel |
 | **Tab** | The session menu |
 
 ### Spectator controls

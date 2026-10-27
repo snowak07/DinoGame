@@ -298,10 +298,10 @@ private:
 	/** So the log says when reporting starts and stops, rather than four lines a second. */
 	bool bWasReportingSpeech = false;
 
-	/** Client side of the noise debug's throttle - see DinoNoiseRules::ShouldDrawVoice. */
+	/** Client side of the noise debug's throttle - see DinoNoiseRules::ShouldDrawNoise. */
 	void DrawOwnVoiceRings(float Loudness);
 	double LastOwnRingTime = -1.0e9;
-	float LastOwnRingLoudness = 0.0f;
+	float LastOwnRingRange = 0.0f;
 
 	/** Server: the last accepted speech report, so a misbehaving client cannot flood noises. */
 	double LastSpeechReportTime = -1.0e9;

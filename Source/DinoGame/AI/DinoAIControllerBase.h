@@ -87,8 +87,15 @@ public:
 	 */
 	bool Investigate(const FVector& Location, AActor* Source, const TCHAR* Reason, bool bForce = false);
 
-	/** For UDinoNoiseSubsystem: true at most once per Interval, so a long sentence is one reaction a second. */
-	bool CanReactToVoice(const AActor* Speaker, double Now, double Interval);
+	/** For UDinoNoiseSubsystem: true at most once per Interval, so a long sentence or a walk is one reaction a second. */
+	bool CanReactToNoise(double Now, double Interval);
+
+	/**
+	 * How far this creature sees right now: SightRadius for something new, the wider
+	 * LoseSightRadius for something already seen (a vision test closes the gap). What
+	 * ADinoCharacter::CanBeSeenFrom shortens for a crouched player.
+	 */
+	float GetSightRange(bool bAlreadySeen) const;
 
 	/** Where the target was last perceived. Meaningless while there has never been one. */
 	UFUNCTION(BlueprintPure, Category = "Dino|AI")
@@ -136,6 +143,17 @@ public:
 
 	/** Recorded by the search task when it issues a move, so debug draw follows reality. */
 	void SetActiveSearchDestination(const FVector& Destination);
+
+	/**
+	 * The closest point to Wanted this creature can actually walk to, on its own navmesh: Wanted
+	 * itself when reachable, otherwise the end of the longest partial path toward it. False only
+	 * when there is no path at all (the creature is off its navmesh).
+	 *
+	 * Every search leg goes through this. A spot off the creature's navmesh - a player in a gap
+	 * between bushes narrower than a raptor - used to fail every move instantly, and the search
+	 * retried that same spot thousands of times instead of coming as close as it could.
+	 */
+	bool ResolveReachablePoint(const FVector& Wanted, FVector& OutPoint) const;
 
 	/** The candidate chosen for the *next* leg. Seeded to LastKnownLocation on contact loss. */
 	UFUNCTION(BlueprintPure, Category = "Dino|AI")
@@ -603,6 +621,9 @@ private:
 	bool bChasePathPartial = false;
 	FString LastChaseRequest = TEXT("none");
 	FString LastMoveEnd = TEXT("none");
+
+	/** The last chase situation logged (reachable / out of reach / no path), so it logs on change. */
+	FString LastChaseSituation;
 
 	/** Fires once MemoryDuration elapses without regaining contact. */
 	void ForgetTarget();

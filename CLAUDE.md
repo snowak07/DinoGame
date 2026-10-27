@@ -223,7 +223,8 @@ mostly find players through what they hear and feel. Every one of those routes e
 | | Where | Notes |
 |---|---|---|
 | Voice | `ADinoPlayerController::SampleOwnSpeech` → `ServerReportSpeech` → `UDinoNoiseSubsystem::ReportVoice` | Measured on the speaker's own machine; the host can't, as it doesn't hear players it muted |
-| Close range | `CheckCloseSense` in the combat tick | 3 m from the body's edge, any direction, blocked by walls |
+| Close range | `CheckCloseSense` in the combat tick | 3 m from the body's edge, any direction, blocked by walls; halved crouched |
+| Footsteps, landings | `ADinoCharacter::ReportFootsteps` / `Landed` → `UDinoNoiseSubsystem::ReportNoise` | Judged on the host from real movement; crouch-walking is silent |
 | Flare hit | `ADinoFlareProjectile::HandleOverlap` | Forced: waits out the stagger, overrides a hunt |
 
 - **Never use `IOnlineVoice::IsLocalPlayerTalking`: in 5.8.1 it always says no.**
@@ -231,6 +232,14 @@ mostly find players through what they hear and feel. Every one of those routes e
   `UDinoVoiceSubsystem::IsLocallyTalking`, fed by the voice system's talking-state event (the one
   behind the `Trigger Local 0 TALKING` log line). Relying on it was why real voices never alerted
   a creature while `DinoNoise` did. The test `Voice.Talking.EngineQuirkStillPresent` fails if Epic fixes it.
+- **Crouching shortens sight through `ADinoCharacter::CanBeSeenFrom`** (`IAISightTargetInterface`).
+  Implementing that hook replaces the engine's line-of-sight test for players entirely: returning
+  "undefined" is not handed back to the default. So the hook repeats the engine's own trace (the
+  AI system's sight channel, read from its config; visible if clear or blocked only by the
+  player's own parts). Change one and check the other.
+- **The crouched camera is the first-person arms eased down** (`UpdateCrouchView`). On a crouch
+  the engine keeps the arms, and the camera on them, at standing height. The drop is measured
+  at each crouch rather than fixed, and the pinned pose owns the arms while it is applied.
 - **Noise is not the engine's hearing sense.** `UAISense_Hearing` ignores walls, so
   `UDinoNoiseSubsystem` traces to each creature and shortens the range itself (`DinoNoiseRules`).
 - **The rules are plain functions** (`DinoTargetRules`, `DinoNoiseRules`), shared by the AI,
@@ -239,6 +248,15 @@ mostly find players through what they hear and feel. Every one of those routes e
   searching sends no new "seen" event, so `AcquireVisibleWhileNotHunting` re-checks every combat
   tick, and `ReconsiderTarget` re-picks the closest while hunting. Anything that changes what a
   creature should be looking at can't rely on a perception event arriving.
+- **Every search leg walks to the closest point it can reach** (`ResolveReachablePoint`, a
+  partial path allowed to end off the navmesh). A spot a creature cannot stand on (a player in a
+  gap between bushes narrower than a raptor) used to fail every move instantly, and the search
+  retried it 13,000 times in 20 s. Behind that, a safety net: 3 instant legs and it looks around
+  itself instead, 10 and it ends the search.
+- **The chase does the same** (`MakeChaseRequest`: partial path, end allowed off the navmesh,
+  whatever the StateTree node says). The engine's defaults require the end to be on the navmesh,
+  so a player in such a spot got no path at all and a hunting raptor stood still ten metres away.
+  The log says `chase of X: target out of reach ... (stops N m short, at ...)` on each change.
 - **Investigate needs a valid target.** The search machinery is built around one: who it's looking
   for, and when it gives up. A noise with no player behind it is ignored.
 - **A hunt is never redirected from `HandlePerceptionUpdated`.** That used to take whoever was
@@ -346,8 +364,9 @@ The log checker judges **only the newest build**; older logs are history, so a f
 failing the check once the fix has been played. It explains a disconnect from the other
 machine's log (the host left just before) and fails on one it cannot explain. It lists
 **coverage gaps**, risky paths the session never exercised, such as a restart while someone
-talked: not failures, but next session's test list. It fails when a round was played and no
-self-check ran, and when its own parsing missed a marker the raw text contains, the sign an
+talked: not failures, but next session's test list. It fails on any `Error` our own code
+(`LogDino*`) logged, since we log Error only for something believed wrong. It fails when a round
+was played and no self-check ran, and when its own parsing missed a marker the raw text contains, the sign an
 engine update changed a log format. When that happens, add a real excerpt to `Tools/fixtures`.
 
 - **Every bug fix gets a unit test that fails without the fix**, checked by briefly reverting it.

@@ -34,17 +34,33 @@ namespace DinoNoiseRules
 	}
 
 	/**
-	 * Whether one speaker's voice report is drawn by the noise debug: only if it is louder than
-	 * the drawing still on screen for them, or that drawing has expired. A talker reports four
-	 * times a second and each drawing lasts seconds, so drawing all of them stacked a dozen
+	 * Whether a noise is drawn by the noise debug: only if it carries further than the drawing of
+	 * the same kind still on screen for its source, or that drawing has expired. A talker reports
+	 * four times a second and each drawing lasts seconds, so drawing all of them stacked a dozen
 	 * overlapping rings; this keeps the loudest, which is the one that matters for "how far did
-	 * my voice reach".
+	 * that reach".
 	 *
-	 * @param LastDrawTime      when this speaker's current drawing was made (very negative if never)
-	 * @param LastDrawLoudness  its loudness
+	 * @param LastDrawTime   when the current drawing was made (very negative if never)
+	 * @param LastDrawRange  how far it carried
 	 */
-	inline bool ShouldDrawVoice(double Now, double LastDrawTime, float LastDrawLoudness, float Loudness, double DrawSeconds)
+	inline bool ShouldDrawNoise(double Now, double LastDrawTime, float LastDrawRange, float Range, double DrawSeconds)
 	{
-		return Now - LastDrawTime >= DrawSeconds || Loudness > LastDrawLoudness;
+		return Now - LastDrawTime >= DrawSeconds || Range > LastDrawRange;
+	}
+
+	/**
+	 * How far a player's footsteps carry: none while crouched or in the air (landing is its own
+	 * noise), none when barely moving, otherwise WalkRange scaled by speed - so a gamepad stick
+	 * pushed halfway is half as loud.
+	 *
+	 * @param MinSpeed  below this (cm/s) a player is shuffling or turning on the spot: silent
+	 */
+	inline float FootstepRange(float Speed, float MaxSpeed, bool bCrouched, bool bOnGround, float WalkRange, float MinSpeed = 50.0f)
+	{
+		if (bCrouched || !bOnGround || Speed < MinSpeed || MaxSpeed <= 0.0f)
+		{
+			return 0.0f;
+		}
+		return WalkRange * FMath::Clamp(Speed / MaxSpeed, 0.0f, 1.0f);
 	}
 }

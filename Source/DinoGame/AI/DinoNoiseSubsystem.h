@@ -5,7 +5,7 @@
 #include "DinoNoiseSubsystem.generated.h"
 
 /**
- * Noises creatures can hear - today, players' voices. Server only.
+ * Noises creatures can hear: players' voices, footsteps and landings. Server only.
  *
  * Not the engine's hearing sense (UAISense_Hearing): that ignores walls entirely, so a whisper
  * behind a rock would carry exactly as far as one in the open. This checks each creature in
@@ -30,6 +30,13 @@ public:
 	 */
 	void ReportVoice(const FVector& Location, float Loudness, AActor* Speaker);
 
+	/**
+	 * Any noise at Location from Source, carrying OpenRange in the open (less through things).
+	 * Kind groups one source's noises for the log and debug draw ("voice", "footsteps"); Label
+	 * describes this one for both; Reason is what a creature that investigates logs.
+	 */
+	void ReportNoise(const FVector& Location, float OpenRange, AActor* Source, FName Kind, const FString& Label, const TCHAR* Reason);
+
 	/** How far a voice of this loudness carries in the open, from the dino.Noise.* settings. */
 	static float GetOpenRange(float Loudness);
 
@@ -43,24 +50,26 @@ public:
 	static bool IsDebugDrawOn();
 
 	/**
-	 * The two rings for a voice from Speaker: how far it carries in the open, and through
-	 * something. Flat on the floor under them, where they can be read; drawn at head height they
+	 * The two rings for a noise from Source: how far it carries in the open, and through
+	 * something. Flat on the floor under it, where they can be read; drawn at head height they
 	 * cut through the speaker's own body. Drawn by the host, and by a speaker's own machine for
 	 * their own voice - a client sees no host debug draw, but can work this much out for itself.
 	 */
-	static void DrawRangeRings(const UWorld* World, const AActor* Speaker, const FVector& MouthLocation, float Loudness);
+	static void DrawRangeRings(const UWorld* World, const AActor* Source, const FVector& NoiseLocation, float OpenRange, const FString& Label);
 
-	/** Seconds a noise drawing stays up, for the speaker-side throttle (DinoNoiseRules::ShouldDrawVoice). */
+	/** Seconds a noise drawing stays up, for the speaker-side throttle (DinoNoiseRules::ShouldDrawNoise). */
 	static double GetDebugDrawSeconds();
 
 protected:
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
 
 private:
-	/** Per speaker, for a compact log line rather than one per report. */
-	TMap<TWeakObjectPtr<AActor>, double> LastLoggedReport;
+	using FSourceKind = TTuple<TWeakObjectPtr<AActor>, FName>;
 
-	/** Per speaker, the drawing on screen now: when it was made and how loud. See ShouldDrawVoice. */
-	struct FDrawnVoice { double Time = -1.0e9; float Loudness = 0.0f; };
-	TMap<TWeakObjectPtr<AActor>, FDrawnVoice> LastDrawnVoice;
+	/** Per source and kind, for a compact log line rather than one per report. */
+	TMap<FSourceKind, double> LastLoggedReport;
+
+	/** Per source and kind, the drawing on screen now: when, and how far it carried. See ShouldDrawNoise. */
+	struct FDrawnNoise { double Time = -1.0e9; float Range = 0.0f; };
+	TMap<FSourceKind, FDrawnNoise> LastDrawnNoise;
 };

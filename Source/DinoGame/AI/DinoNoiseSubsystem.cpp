@@ -34,8 +34,8 @@ namespace
 	 */
 	constexpr float DebugDrawSeconds = 4.5f;
 
-	/** How often one speaker's voice may set off investigations. Reports arrive up to 4 times a second. */
-	constexpr double VoiceRetriggerSeconds = 1.0;
+	/** How often noises may set off a creature's investigation. Voices report up to 4 times a second. */
+	constexpr double NoiseRetriggerSeconds = 1.0;
 
 	/** How often a still-talking speaker gets a "heard by" log line. */
 	constexpr double LogIntervalSeconds = 2.0;
@@ -73,7 +73,7 @@ double UDinoNoiseSubsystem::GetDebugDrawSeconds()
 	return DebugDrawSeconds;
 }
 
-void UDinoNoiseSubsystem::DrawRangeRings(const UWorld* World, const AActor* Speaker, const FVector& MouthLocation, float Loudness)
+void UDinoNoiseSubsystem::DrawRangeRings(const UWorld* World, const AActor* Source, const FVector& NoiseLocation, float OpenRange, const FString& Label)
 {
 #if ENABLE_DRAW_DEBUG
 	if (!World)
@@ -81,55 +81,56 @@ void UDinoNoiseSubsystem::DrawRangeRings(const UWorld* World, const AActor* Spea
 		return;
 	}
 
-	// The floor under the speaker, a little above it so the rings are not buried in it.
-	FVector Location = MouthLocation;
-	FCollisionQueryParams Params(SCENE_QUERY_STAT(DinoNoiseDebugFloor), false, Speaker);
+	// The floor under the source, a little above it so the rings are not buried in it.
+	FVector Location = NoiseLocation;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(DinoNoiseDebugFloor), false, Source);
 	FHitResult Floor;
-	if (World->LineTraceSingleByChannel(Floor, MouthLocation, MouthLocation - FVector(0.0f, 0.0f, 1000.0f), ECC_Visibility, Params))
+	if (World->LineTraceSingleByChannel(Floor, NoiseLocation, NoiseLocation - FVector(0.0f, 0.0f, 1000.0f), ECC_Visibility, Params))
 	{
 		Location = Floor.ImpactPoint + FVector(0.0f, 0.0f, 5.0f);
 	}
 
-	const float Whisper = CVarWhisperRange.GetValueOnGameThread();
-	const float Shout = CVarShoutRange.GetValueOnGameThread();
-	const float WallFactor = CVarWallFactor.GetValueOnGameThread();
-	const float Open = DinoNoiseRules::HeardRange(Loudness, false, Whisper, Shout, WallFactor);
-	const float Walled = DinoNoiseRules::HeardRange(Loudness, true, Whisper, Shout, WallFactor);
+	const float Walled = OpenRange * FMath::Clamp(CVarWallFactor.GetValueOnGameThread(), 0.0f, 1.0f);
 
-	// Flat rings at the speaker's height: yellow is how far this voice carries in the open,
-	// orange how far through something.
-	DrawDebugCircle(World, Location, Open, 64, FColor::Yellow, false, DebugDrawSeconds, 0, 4.0f, FVector::ForwardVector, FVector::RightVector, false);
+	// Yellow: how far this noise carries in the open. Orange: through something.
+	DrawDebugCircle(World, Location, OpenRange, 64, FColor::Yellow, false, DebugDrawSeconds, 0, 4.0f, FVector::ForwardVector, FVector::RightVector, false);
 	DrawDebugCircle(World, Location, Walled, 48, FColor::Orange, false, DebugDrawSeconds, 0, 2.0f, FVector::ForwardVector, FVector::RightVector, false);
 	DrawDebugString(World, Location + FVector(0.0f, 0.0f, 40.0f),
-		FString::Printf(TEXT("voice %.2f: %.0f m open, %.0f m blocked"), Loudness, Open / 100.0f, Walled / 100.0f),
+		FString::Printf(TEXT("%s: %.0f m open, %.0f m blocked"), *Label, OpenRange / 100.0f, Walled / 100.0f),
 		nullptr, FColor::Yellow, DebugDrawSeconds, true);
 #endif
 }
 
 void UDinoNoiseSubsystem::ReportVoice(const FVector& Location, float Loudness, AActor* Speaker)
 {
+	ReportNoise(Location, GetOpenRange(Loudness), Speaker, TEXT("voice"),
+		FString::Printf(TEXT("voice (loudness %.2f)"), Loudness), TEXT("a voice"));
+}
+
+void UDinoNoiseSubsystem::ReportNoise(const FVector& Location, float OpenRange, AActor* Source, FName Kind,
+	const FString& Label, const TCHAR* Reason)
+{
 	UWorld* World = GetWorld();
-	if (!World || World->GetNetMode() == NM_Client || !Speaker)
+	if (!World || World->GetNetMode() == NM_Client || !Source || OpenRange <= 0.0f)
 	{
 		return;
 	}
 
 	const double Now = World->GetTimeSeconds();
-	const float Whisper = CVarWhisperRange.GetValueOnGameThread();
-	const float Shout = CVarShoutRange.GetValueOnGameThread();
-	const float WallFactor = CVarWallFactor.GetValueOnGameThread();
+	const float WallFactor = FMath::Clamp(CVarWallFactor.GetValueOnGameThread(), 0.0f, 1.0f);
 
-	// Drawn only when louder than this speaker's drawing still on screen, or once it expires.
+	// Drawn only when it carries further than this source's drawing of this kind still on
+	// screen, or once that expires - the loudest recent one is what matters.
 	bool bDraw = false;
 	if (IsDebugDrawOn())
 	{
-		FDrawnVoice& Drawn = LastDrawnVoice.FindOrAdd(Speaker);
-		if (DinoNoiseRules::ShouldDrawVoice(Now, Drawn.Time, Drawn.Loudness, Loudness, DebugDrawSeconds))
+		FDrawnNoise& Drawn = LastDrawnNoise.FindOrAdd(MakeTuple(TWeakObjectPtr<AActor>(Source), Kind));
+		if (DinoNoiseRules::ShouldDrawNoise(Now, Drawn.Time, Drawn.Range, OpenRange, DebugDrawSeconds))
 		{
 			Drawn.Time = Now;
-			Drawn.Loudness = Loudness;
+			Drawn.Range = OpenRange;
 			bDraw = true;
-			DrawRangeRings(World, Speaker, Location, Loudness);
+			DrawRangeRings(World, Source, Location, OpenRange, Label);
 		}
 	}
 
@@ -145,27 +146,27 @@ void UDinoNoiseSubsystem::ReportVoice(const FVector& Location, float Loudness, A
 		}
 
 		const float Distance = FVector::Dist(Location, Creature->GetActorLocation());
-		if (Distance > Shout)
+		if (Distance > OpenRange)
 		{
-			continue; // beyond any voice; not worth a trace or a log entry
+			continue; // out of reach even in the open; not worth a trace or a log entry
 		}
 
 		FVector Eyes;
 		FRotator EyeRotation;
 		Creature->GetActorEyesViewPoint(Eyes, EyeRotation);
-		FCollisionQueryParams Params(SCENE_QUERY_STAT(DinoVoiceNoise), false, Creature);
-		Params.AddIgnoredActor(Speaker);
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(DinoNoise), false, Creature);
+		Params.AddIgnoredActor(Source);
 		FHitResult Hit;
 		const bool bBlocked = World->LineTraceSingleByChannel(Hit, Location, Eyes, ECC_Visibility, Params);
 
-		// What cut the line, and how far along: the question when voices seem to carry too little.
+		// What cut the line, and how far along: the question when noises seem to carry too little.
 		// A tree trunk, a bush, a rock and a rise in the ground all call for different fixes.
 		const FString Blocker = bBlocked
 			? FString::Printf(TEXT("%s/%s at %.1f m"), *GetNameSafe(Hit.GetActor()), *GetNameSafe(Hit.GetComponent()),
 				FVector::Dist(Location, Hit.ImpactPoint) / 100.0f)
 			: FString();
 
-		const float Range = DinoNoiseRules::HeardRange(Loudness, bBlocked, Whisper, Shout, WallFactor);
+		const float Range = bBlocked ? OpenRange * WallFactor : OpenRange;
 		const bool bHeard = Distance <= Range;
 		const FString Entry = FString::Printf(TEXT("%s %.1f/%.1f m%s"), *Creature->GetName(),
 			Distance / 100.0f, Range / 100.0f, bBlocked ? *FString::Printf(TEXT(" muffled by %s"), *Blocker) : TEXT(""));
@@ -201,19 +202,20 @@ void UDinoNoiseSubsystem::ReportVoice(const FVector& Location, float Loudness, A
 		}
 
 		Heard.Add(Entry);
-		if (Brain->CanReactToVoice(Speaker, Now, VoiceRetriggerSeconds))
+		if (Brain->CanReactToNoise(Now, NoiseRetriggerSeconds))
 		{
-			Brain->Investigate(Location, Speaker, TEXT("a voice"));
+			Brain->Investigate(Location, Source, Reason);
 		}
 	}
 
-	// One line per speaker every couple of seconds while they talk: who heard, who was in reach
-	// of a shout but not of this voice, and the numbers behind each - distance / heard range.
-	double& LastLog = LastLoggedReport.FindOrAdd(Speaker, -1.0e9);
+	// One line per source and kind every couple of seconds while it goes on: who heard, who was
+	// in reach in the open but not through what was in the way, and the numbers behind each -
+	// distance / range that applied.
+	double& LastLog = LastLoggedReport.FindOrAdd(MakeTuple(TWeakObjectPtr<AActor>(Source), Kind), -1.0e9);
 	if ((!Heard.IsEmpty() || !TooFar.IsEmpty()) && Now - LastLog >= LogIntervalSeconds)
 	{
 		LastLog = Now;
-		UE_LOG(LogDinoGame, Log, TEXT("Noise: %s's voice (loudness %.2f) heard by [%s]; out of reach [%s]."),
-			*Speaker->GetName(), Loudness, *FString::Join(Heard, TEXT(", ")), *FString::Join(TooFar, TEXT(", ")));
+		UE_LOG(LogDinoGame, Log, TEXT("Noise: %s's %s heard by [%s]; out of reach [%s]."),
+			*Source->GetName(), *Label, *FString::Join(Heard, TEXT(", ")), *FString::Join(TooFar, TEXT(", ")));
 	}
 }

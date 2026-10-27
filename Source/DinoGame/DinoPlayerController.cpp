@@ -112,15 +112,16 @@ void ADinoPlayerController::DrawOwnVoiceRings(float Loudness)
 	// The host draws its own; drawing here too would double the rings on the host's screen.
 	const UWorld* World = GetWorld();
 	if (HasAuthority() || !World || !GetPawn() || !UDinoNoiseSubsystem::IsDebugDrawOn()
-		|| !DinoNoiseRules::ShouldDrawVoice(World->GetTimeSeconds(), LastOwnRingTime, LastOwnRingLoudness,
-			Loudness, UDinoNoiseSubsystem::GetDebugDrawSeconds()))
+		|| !DinoNoiseRules::ShouldDrawNoise(World->GetTimeSeconds(), LastOwnRingTime, LastOwnRingRange,
+			UDinoNoiseSubsystem::GetOpenRange(Loudness), UDinoNoiseSubsystem::GetDebugDrawSeconds()))
 	{
 		return;
 	}
 
 	LastOwnRingTime = World->GetTimeSeconds();
-	LastOwnRingLoudness = Loudness;
-	UDinoNoiseSubsystem::DrawRangeRings(World, GetPawn(), GetPawn()->GetPawnViewLocation(), Loudness);
+	LastOwnRingRange = UDinoNoiseSubsystem::GetOpenRange(Loudness);
+	UDinoNoiseSubsystem::DrawRangeRings(World, GetPawn(), GetPawn()->GetPawnViewLocation(), LastOwnRingRange,
+		FString::Printf(TEXT("voice (loudness %.2f)"), Loudness));
 }
 
 void ADinoPlayerController::DinoNoise(float Loudness)

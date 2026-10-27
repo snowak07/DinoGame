@@ -1,6 +1,13 @@
 ﻿#include "DinoCharacter.h"
 
+#include "AI/DinoAIControllerBase.h"
 #include "AI/DinoCreature.h"
+#include "AI/DinoNoiseRules.h"
+#include "AI/DinoNoiseSubsystem.h"
+#include "AI/DinoStealth.h"
+#include "AI/DinoTargetRules.h"
+#include "AISystem.h"
+#include "TimerManager.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "DinoDamageTypes.h"
@@ -24,7 +31,9 @@
 
 ADinoCharacter::ADinoCharacter()
 {
-	PrimaryActorTick.bCanEverTick = false;
+	// Ticks only while locally controlled, for the crouch view - see NotifyControllerChanged.
+	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bStartWithTickEnabled = false;
 
 	// The inherited mesh is the third-person body other players see. The owner sees only the
 	// first-person arms, which live on the Blueprint.
@@ -157,6 +166,8 @@ void ADinoCharacter::OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeigh
 	{
 		ApplyPinnedPose();
 	}
+
+	BeginCrouchView();
 }
 
 void ADinoCharacter::OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
@@ -167,6 +178,185 @@ void ADinoCharacter::OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightA
 	{
 		ApplyPinnedPose();
 	}
+
+	CrouchViewDropTarget = 0.0f;
+}
+
+void ADinoCharacter::NotifyControllerChanged()
+{
+	Super::NotifyControllerChanged();
+	SetActorTickEnabled(IsLocallyControlled());
+}
+
+void ADinoCharacter::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	UpdateCrouchView(DeltaSeconds);
+}
+
+void ADinoCharacter::BeginCrouchView()
+{
+	if (!IsLocallyControlled())
+	{
+		return;
+	}
+
+	const UCameraComponent* Camera = FindComponentByClass<UCameraComponent>();
+	const UCapsuleComponent* Capsule = GetCapsuleComponent();
+	if (!Camera || !Capsule)
+	{
+		return;
+	}
+
+	// Measured rather than assumed: where the camera would be with no drop applied, above the
+	// feet, now that the capsule has shrunk - whatever the arms are attached to, and whatever the
+	// engine already moved. The drop is whatever is left to reach CrouchedViewHeight.
+	const float FeetZ = Capsule->GetComponentLocation().Z - Capsule->GetScaledCapsuleHalfHeight();
+	const float RawHeight = Camera->GetComponentLocation().Z + CrouchViewDrop - FeetZ;
+	CrouchViewDropTarget = FMath::Max(0.0f, RawHeight - CrouchedViewHeight);
+
+	UE_LOG(LogDinoGame, Log, TEXT("Crouch: view lowering %.0f cm (camera %.0f cm above the floor, crouched view %.0f cm)."),
+		CrouchViewDropTarget, RawHeight, CrouchedViewHeight);
+}
+
+void ADinoCharacter::UpdateCrouchView(float DeltaSeconds)
+{
+	USceneComponent* Arms = FindFirstPersonMesh();
+	if (!Arms || !IsLocallyControlled())
+	{
+		return;
+	}
+
+	// The pinned pose places the arms itself, and restores them when it ends.
+	if (bPinnedPoseApplied)
+	{
+		return;
+	}
+
+	if (!bHaveArmsStandingLocation)
+	{
+		ArmsStandingLocation = Arms->GetRelativeLocation();
+		bHaveArmsStandingLocation = true;
+	}
+
+	if (FMath::IsNearlyEqual(CrouchViewDrop, CrouchViewDropTarget, 0.1f) && FMath::IsNearlyZero(CrouchViewDropTarget))
+	{
+		if (!FMath::IsNearlyZero(CrouchViewDrop))
+		{
+			CrouchViewDrop = 0.0f;
+			Arms->SetRelativeLocation(ArmsStandingLocation);
+		}
+		return;
+	}
+
+	CrouchViewDrop = FMath::FInterpTo(CrouchViewDrop, CrouchViewDropTarget, DeltaSeconds, CrouchViewSpeed);
+
+	// Straight down in the world, expressed in whatever the arms are attached to.
+	const USceneComponent* Parent = Arms->GetAttachParent();
+	const FVector Down = Parent
+		? Parent->GetComponentTransform().InverseTransformVectorNoScale(FVector(0.0f, 0.0f, -CrouchViewDrop))
+		: FVector(0.0f, 0.0f, -CrouchViewDrop);
+	Arms->SetRelativeLocation(ArmsStandingLocation + Down);
+}
+
+UAISense_Sight::EVisibilityResult ADinoCharacter::CanBeSeenFrom(const FCanBeSeenFromContext& Context, FVector& OutSeenLocation,
+	int32& OutNumberOfLoSChecksPerformed, int32& OutNumberOfAsyncLosCheckRequested, float& OutSightStrength,
+	int32* /*UserData*/, const FOnPendingVisibilityQueryProcessedDelegate* /*Delegate*/)
+{
+	OutNumberOfLoSChecksPerformed = 0;
+	OutNumberOfAsyncLosCheckRequested = 0;
+	OutSightStrength = 1.0f;
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return UAISense_Sight::EVisibilityResult::NotVisible;
+	}
+
+	const FVector TargetLocation = GetActorLocation();
+
+	// Crouched: only the near part of its range. The engine has already checked the full range
+	// and the cone before asking.
+	if (bIsCrouched)
+	{
+		const APawn* Observer = Cast<APawn>(Context.IgnoreActor);
+		if (const ADinoAIControllerBase* Brain = Observer ? Cast<ADinoAIControllerBase>(Observer->GetController()) : nullptr)
+		{
+			const bool bAlreadySeen = Context.bWasVisible && *Context.bWasVisible;
+			const float Range = DinoTargetRules::StealthRange(Brain->GetSightRange(bAlreadySeen), true, DinoStealth::CrouchSightFactor());
+			if (FVector::DistSquared(Context.ObserverLocation, TargetLocation) > FMath::Square(Range))
+			{
+				return UAISense_Sight::EVisibilityResult::NotVisible;
+			}
+		}
+	}
+
+	// The engine's own test, as UAISense_Sight::ComputeVisibility runs it for any target without
+	// this hook: the configured sight channel, complex collision, ignoring the observer.
+	static const ECollisionChannel SightChannel = []()
+	{
+		const FByteProperty* Property = FindFProperty<FByteProperty>(UAISystem::StaticClass(), TEXT("DefaultSightCollisionChannel"));
+		return Property
+			? static_cast<ECollisionChannel>(Property->GetPropertyValue_InContainer(GetDefault<UAISystem>()))
+			: ECC_Visibility;
+	}();
+
+	const FCollisionQueryParams Params(SCENE_QUERY_STAT(AILineOfSight), true, Context.IgnoreActor);
+	FHitResult Hit;
+	const bool bHit = World->LineTraceSingleByChannel(Hit, Context.ObserverLocation, TargetLocation, SightChannel, Params);
+	++OutNumberOfLoSChecksPerformed;
+
+	const AActor* HitActor = bHit ? Hit.HitObjectHandle.FetchActor() : nullptr;
+	if (!bHit || (HitActor && HitActor->IsOwnedBy(this)))
+	{
+		OutSeenLocation = TargetLocation;
+		return UAISense_Sight::EVisibilityResult::Visible;
+	}
+	return UAISense_Sight::EVisibilityResult::NotVisible;
+}
+
+void ADinoCharacter::ReportFootsteps()
+{
+	const UCharacterMovementComponent* Movement = GetCharacterMovement();
+	UDinoNoiseSubsystem* Noise = GetWorld() ? GetWorld()->GetSubsystem<UDinoNoiseSubsystem>() : nullptr;
+	if (!Movement || !Noise || !IsAlive() || IsRestrained())
+	{
+		return;
+	}
+
+	const float Speed = GetVelocity().Size2D();
+	const float Range = DinoNoiseRules::FootstepRange(Speed, Movement->GetMaxSpeed(), bIsCrouched,
+		Movement->IsMovingOnGround(), DinoStealth::FootstepRange());
+
+	// Logged as it changes - starting to walk, crouching, stopping - not every step.
+	if (!FMath::IsNearlyEqual(Range, LastFootstepRange, 50.0f) || (Range == 0.0f) != (LastFootstepRange == 0.0f))
+	{
+		UE_LOG(LogDinoGame, Log, TEXT("Footsteps: %s %s (%.0f cm/s%s)."), *GetName(),
+			Range > 0.0f ? *FString::Printf(TEXT("carry %.1f m"), Range / 100.0f) : TEXT("silent"),
+			Speed, bIsCrouched ? TEXT(", crouched") : TEXT(""));
+		LastFootstepRange = Range;
+	}
+
+	if (Range > 0.0f)
+	{
+		Noise->ReportNoise(GetActorLocation(), Range, this, TEXT("footsteps"),
+			FString::Printf(TEXT("footsteps (%.0f cm/s)"), Speed), TEXT("footsteps"));
+	}
+}
+
+void ADinoCharacter::Landed(const FHitResult& Hit)
+{
+	Super::Landed(Hit);
+
+	UDinoNoiseSubsystem* Noise = GetWorld() ? GetWorld()->GetSubsystem<UDinoNoiseSubsystem>() : nullptr;
+	if (!HasAuthority() || !Noise || !IsAlive())
+	{
+		return;
+	}
+
+	UE_LOG(LogDinoGame, Log, TEXT("Footsteps: %s landed (carries %.1f m)."), *GetName(), DinoStealth::LandingRange() / 100.0f);
+	Noise->ReportNoise(GetActorLocation(), DinoStealth::LandingRange(), this, TEXT("landing"), TEXT("landing"), TEXT("a landing"));
 }
 
 void ADinoCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -184,7 +374,13 @@ void ADinoCharacter::BeginPlay()
 	if (HasAuthority())
 	{
 		CurrentHealth = MaxHealth;
+
+		// Every player's footsteps, judged where movement is authoritative, so the host and
+		// clients make noise by the same rule, in Play In Editor and packaged alike.
+		GetWorldTimerManager().SetTimer(FootstepTimer, this, &ADinoCharacter::ReportFootsteps, 0.4f, true);
 	}
+
+	SetActorTickEnabled(IsLocallyControlled());
 
 	// Covers the listen-server host, whose PlayerState already exists by BeginPlay.
 	BindVoiceToPlayerState();

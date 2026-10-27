@@ -1,5 +1,6 @@
 ﻿#include "AI/DinoAIControllerBase.h"
 
+#include "AI/DinoStealth.h"
 #include "AI/DinoTargetRules.h"
 
 #include "AI/DinoAttackComponent.h"
@@ -21,6 +22,7 @@
 #include "EnvironmentQuery/EnvQueryTypes.h"
 #include "NavigationSystem.h"
 #include "NavigationData.h"
+#include "NavFilters/NavigationQueryFilter.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "Components/StateTreeAIComponent.h"
 
@@ -653,7 +655,7 @@ void ADinoAIControllerBase::AcquireVisibleWhileNotHunting()
 	}
 }
 
-bool ADinoAIControllerBase::CanReactToVoice(const AActor* /*Speaker*/, double Now, double Interval)
+bool ADinoAIControllerBase::CanReactToNoise(double Now, double Interval)
 {
 	if (Now - LastVoiceReactionTime < Interval)
 	{
@@ -661,6 +663,12 @@ bool ADinoAIControllerBase::CanReactToVoice(const AActor* /*Speaker*/, double No
 	}
 	LastVoiceReactionTime = Now;
 	return true;
+}
+
+float ADinoAIControllerBase::GetSightRange(bool bAlreadySeen) const
+{
+	// Mirrors ApplySightConfig: the "lose sight" band is closed in a vision test.
+	return bAlreadySeen && !bVisionTest ? FMath::Max(LoseSightRadius, SightRadius) : SightRadius;
 }
 
 bool ADinoAIControllerBase::Investigate(const FVector& Location, AActor* Source, const TCHAR* Reason, bool bForce)
@@ -782,9 +790,11 @@ void ADinoAIControllerBase::CheckCloseSense()
 			continue;
 		}
 
+		// A crouched player has to get closer before they are felt.
+		const float Radius = DinoTargetRules::StealthRange(CloseSenseRadius, Player->bIsCrouched, DinoStealth::CrouchCloseSenseFactor());
 		const float PlayerRadius = Player->GetCapsuleComponent() ? Player->GetCapsuleComponent()->GetScaledCapsuleRadius() : 0.0f;
 		const float EdgeDistance = FVector::Dist2D(Self->GetActorLocation(), Player->GetActorLocation()) - SelfRadius - PlayerRadius;
-		if (EdgeDistance > CloseSenseRadius)
+		if (EdgeDistance > Radius)
 		{
 			continue;
 		}
@@ -793,10 +803,11 @@ void ADinoAIControllerBase::CheckCloseSense()
 		Params.AddIgnoredActor(Player);
 		const bool bBlocked = World->LineTraceTestByChannel(EyeLocation, Player->GetActorLocation(), ECC_Visibility, Params);
 
-		if (DinoTargetRules::IsWithinCloseSense(EdgeDistance, CloseSenseRadius, bBlocked))
+		if (DinoTargetRules::IsWithinCloseSense(EdgeDistance, Radius, bBlocked))
 		{
 			LastCloseSenseTime = World->GetTimeSeconds();
-			UE_LOG(LogDinoGame, Log, TEXT("%s sensed %s up close (%.1f m)."), *GetName(), *Player->GetName(), EdgeDistance / 100.0f);
+			UE_LOG(LogDinoGame, Log, TEXT("%s sensed %s up close (%.1f m, within %.1f m%s)."), *GetName(), *Player->GetName(),
+				EdgeDistance / 100.0f, Radius / 100.0f, Player->bIsCrouched ? TEXT(" - crouched") : TEXT(""));
 			Investigate(Player->GetActorLocation(), Player, TEXT("a player up close"));
 			return;
 		}
@@ -1089,6 +1100,17 @@ FString ADinoAIControllerBase::ExplainSight(const AActor* Target) const
 			FVector::Dist(Eyes, TargetLocation) / 100.0f, SightRadius / 100.0f);
 	}
 
+	// ADinoCharacter::CanBeSeenFrom's crouch rule, measured from the eyes as it is.
+	if (const ADinoCharacter* Player = Cast<ADinoCharacter>(Target); Player && Player->bIsCrouched)
+	{
+		const float CrouchedRange = DinoTargetRules::StealthRange(GetSightRange(false), true, DinoStealth::CrouchSightFactor());
+		if (FVector::Dist(Eyes, TargetLocation) > CrouchedRange)
+		{
+			return FString::Printf(TEXT("too far while you crouch (%.0fm, sees crouched players %.0fm)"),
+				FVector::Dist(Eyes, TargetLocation) / 100.0f, CrouchedRange / 100.0f);
+		}
+	}
+
 	if (FromApex.SizeSquared() < FMath::Square(NearClippingRadius))
 	{
 		return TEXT("inside near clip (behind its eyes)");
@@ -1192,11 +1214,23 @@ void ADinoAIControllerBase::MaintainChase(const FAIMoveRequest& Request, bool bF
 		++ChaseRestarts;
 	}
 
-	const FPathFollowingRequestResult Result = MoveTo(Request);
+	FPathFollowingRequestResult Result = MoveTo(Request);
 
 	ChaseGoal = Request.GetGoalActor();
 	LastChaseMoveTime = Now;
 	++ChaseMovesIssued;
+
+	// Backstop: should the engine still find no path to the target itself, walk to the closest
+	// point that can be reached by our own query. Standing still is never the answer.
+	bool bToClosestPoint = false;
+	FVector ClosestPoint = FVector::ZeroVector;
+	if (Result.Code == EPathFollowingRequestResult::Failed && Request.GetGoalActor()
+		&& ResolveReachablePoint(Request.GetGoalActor()->GetActorLocation(), ClosestPoint))
+	{
+		Result.Code = MoveToLocation(ClosestPoint, Request.GetAcceptanceRadius(), /*bStopOnOverlap*/ true,
+			/*bUsePathfinding*/ true, /*bProjectDestinationToNavigation*/ false, /*bCanStrafe*/ Request.CanStrafe());
+		bToClosestPoint = Result.Code != EPathFollowingRequestResult::Failed;
+	}
 
 	switch (Result.Code)
 	{
@@ -1211,8 +1245,25 @@ void ADinoAIControllerBase::MaintainChase(const FAIMoveRequest& Request, bool bF
 	// that is simply bad at pathing.
 	const UPathFollowingComponent* PathFollowing = GetPathFollowingComponent();
 	const FNavPathSharedPtr Path = PathFollowing ? PathFollowing->GetPath() : nullptr;
-	bChasePathPartial = Result.Code == EPathFollowingRequestResult::RequestSuccessful
-		&& Path.IsValid() && Path->IsPartial();
+	bChasePathPartial = bToClosestPoint || (Result.Code == EPathFollowingRequestResult::RequestSuccessful
+		&& Path.IsValid() && Path->IsPartial());
+
+	// Logged when the chase's situation changes, not every re-issue: the overlay alone showed
+	// "no path" while a raptor stood ten metres away, and nothing in the log said so.
+	const FString Situation = bToClosestPoint ? TEXT("target out of reach; heading for the closest reachable point")
+		: Result.Code == EPathFollowingRequestResult::Failed ? TEXT("NO PATH, not even partial - the creature is off its navmesh")
+		: bChasePathPartial ? TEXT("target out of reach; heading for the closest reachable point")
+		: TEXT("target reachable");
+	if (Situation != LastChaseSituation || bGoalChanged)
+	{
+		const AActor* Goal = Request.GetGoalActor();
+		const FVector PathEnd = bToClosestPoint ? ClosestPoint
+			: (Path.IsValid() && !Path->GetPathPoints().IsEmpty() ? Path->GetPathPoints().Last().Location : FVector::ZeroVector);
+		const float Short = Goal && !PathEnd.IsZero() ? FVector::Dist2D(PathEnd, Goal->GetActorLocation()) / 100.0f : 0.0f;
+		UE_LOG(LogDinoGame, Log, TEXT("%s chase of %s: %s%s."), *GetName(), *GetNameSafe(Goal), *Situation,
+			bChasePathPartial ? *FString::Printf(TEXT(" (stops %.1f m short, at %s)"), Short, *PathEnd.ToCompactString()) : TEXT(""));
+		LastChaseSituation = Situation;
+	}
 }
 
 void ADinoAIControllerBase::StopChase()
@@ -1468,6 +1519,33 @@ ANavigationData* ADinoAIControllerBase::GetCreatureNavData() const
 	return Nav->GetNavDataForProps(GetNavAgentPropertiesRef(), GetNavAgentLocation());
 }
 
+bool ADinoAIControllerBase::ResolveReachablePoint(const FVector& Wanted, FVector& OutPoint) const
+{
+	UNavigationSystemV1* Nav = UNavigationSystemV1::GetCurrent(GetWorld());
+	const ANavigationData* NavData = GetCreatureNavData();
+	const APawn* Self = GetPawn();
+	if (!Nav || !NavData || !Self || !IsUsableWorldLocation(Wanted))
+	{
+		return false;
+	}
+
+	// Partial paths allowed and the end allowed off the navmesh: the path then runs to the
+	// reachable point nearest the wanted one, which is where the creature should stop.
+	FPathFindingQuery Query(this, *NavData, Self->GetNavAgentLocation(), Wanted,
+		UNavigationQueryFilter::GetQueryFilter(*NavData, this, nullptr));
+	Query.SetAllowPartialPaths(true);
+	Query.SetRequireNavigableEndLocation(false);
+
+	const FPathFindingResult Result = Nav->FindPathSync(Query);
+	if (!Result.IsSuccessful() || !Result.Path.IsValid() || Result.Path->GetPathPoints().IsEmpty())
+	{
+		return false;
+	}
+
+	OutPoint = Result.Path->GetPathPoints().Last().Location;
+	return true;
+}
+
 bool ADinoAIControllerBase::PickFallbackSearchPoint(FVector& OutPoint) const
 {
 	const UNavigationSystemV1* Nav = UNavigationSystemV1::GetCurrent(GetWorld());
@@ -1483,7 +1561,15 @@ bool ADinoAIControllerBase::PickFallbackSearchPoint(FVector& OutPoint) const
 		return false;
 	}
 
-	const FVector Origin = IsUsableWorldLocation(LastKnownLocation) ? LastKnownLocation : Self->GetActorLocation();
+	// Centred on reachable ground: the random pick needs an origin on this creature's navmesh,
+	// and the last known location is often exactly where the creature cannot go - which made
+	// every pick fail and left the search re-trying one unreachable spot.
+	FVector Origin = Self->GetActorLocation();
+	if (IsUsableWorldLocation(LastKnownLocation))
+	{
+		FVector Reachable;
+		Origin = ResolveReachablePoint(LastKnownLocation, Reachable) ? Reachable : Self->GetActorLocation();
+	}
 
 	// A few attempts, because a point too close to where we already are produces a zero-length
 	// leg that completes instantly - which is exactly the spin this is here to stop.
@@ -1532,13 +1618,39 @@ void ADinoAIControllerBase::NotifySearchLegStarted()
 	if (LastLegStartTime > 0.0 && SinceLast < 0.05)
 	{
 		++ConsecutiveFastLegs;
-		if (ConsecutiveFastLegs == 20)
+
+		// A safety net, should a destination ever still fail every move: first look somewhere
+		// around itself instead, and if even that keeps failing, end the search. Spinning
+		// in place for its whole memory - 13,000 instant legs in one playtest - helps nobody.
+		if (ConsecutiveFastLegs == 3)
 		{
-			UE_LOG(LogDinoGame, Error,
-				TEXT("%s: search legs are restarting instantly (%d in a row). The destination is ")
-				TEXT("almost certainly inside the acceptance radius, so every move completes on ")
-				TEXT("arrival. Check goal= in DinoAIStatus against the creature's own position."),
-				*GetName(), ConsecutiveFastLegs);
+			const FVector Stuck = ActiveSearchDestination;
+			const FVector Saved = LastKnownLocation;
+			LastKnownLocation = GetPawn() ? GetPawn()->GetActorLocation() : LastKnownLocation;
+			FVector Elsewhere;
+			const bool bFound = PickFallbackSearchPoint(Elsewhere);
+			LastKnownLocation = Saved;
+			if (bFound)
+			{
+				NextSearchPoint = Elsewhere;
+				NextPointSource = TEXT("unstick");
+			}
+			UE_LOG(LogDinoGame, Warning, TEXT("%s: 3 search legs to %s failed instantly (last move: %s); %s."),
+				*GetName(), *Stuck.ToCompactString(), *LastMoveEnd,
+				bFound ? *FString::Printf(TEXT("trying %s around itself instead"), *Elsewhere.ToCompactString())
+					: TEXT("found nowhere else to try"));
+		}
+		else if (ConsecutiveFastLegs == 10)
+		{
+			UE_LOG(LogDinoGame, Error, TEXT("%s: search legs are still failing instantly (%d in a row, last move: %s); ending the search."),
+				*GetName(), ConsecutiveFastLegs, *LastMoveEnd);
+
+			// Not from inside the search step's own start, which is where this is called.
+			GetWorldTimerManager().SetTimerForNextTick(FTimerDelegate::CreateWeakLambda(this, [this]()
+			{
+				bHasLiveContact = false;
+				ForgetTarget();
+			}));
 		}
 	}
 	else

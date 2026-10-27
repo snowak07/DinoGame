@@ -85,11 +85,35 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDinoNoiseDrawTest, "DinoGame.AI.Noise.DebugDra
 bool FDinoNoiseDrawTest::RunTest(const FString& Parameters)
 {
 	constexpr double Window = 4.5;
-	TestTrue(TEXT("nothing drawn yet: draw"), DinoNoiseRules::ShouldDrawVoice(10.0, -1.0e9, 0.0f, 0.2f, Window));
-	TestFalse(TEXT("quieter, while the last is still up: skip"), DinoNoiseRules::ShouldDrawVoice(11.0, 10.0, 0.5f, 0.3f, Window));
-	TestFalse(TEXT("as loud, while the last is still up: skip"), DinoNoiseRules::ShouldDrawVoice(11.0, 10.0, 0.5f, 0.5f, Window));
-	TestTrue(TEXT("louder, while the last is still up: draw"), DinoNoiseRules::ShouldDrawVoice(11.0, 10.0, 0.5f, 0.6f, Window));
-	TestTrue(TEXT("quieter, but the last has expired: draw"), DinoNoiseRules::ShouldDrawVoice(14.5, 10.0, 0.9f, 0.1f, Window));
+	TestTrue(TEXT("nothing drawn yet: draw"), DinoNoiseRules::ShouldDrawNoise(10.0, -1.0e9, 0.0f, 0.2f, Window));
+	TestFalse(TEXT("shorter, while the last is still up: skip"), DinoNoiseRules::ShouldDrawNoise(11.0, 10.0, 0.5f, 0.3f, Window));
+	TestFalse(TEXT("as far, while the last is still up: skip"), DinoNoiseRules::ShouldDrawNoise(11.0, 10.0, 0.5f, 0.5f, Window));
+	TestTrue(TEXT("further, while the last is still up: draw"), DinoNoiseRules::ShouldDrawNoise(11.0, 10.0, 0.5f, 0.6f, Window));
+	TestTrue(TEXT("shorter, but the last has expired: draw"), DinoNoiseRules::ShouldDrawNoise(14.5, 10.0, 0.9f, 0.1f, Window));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDinoFootstepTest, "DinoGame.AI.Noise.Footsteps", DinoTestFlags)
+bool FDinoFootstepTest::RunTest(const FString& Parameters)
+{
+	// Speed, max speed, crouched, on the ground, expected range (walk range 600).
+	TestEqual(TEXT("full walking speed: full range"), DinoNoiseRules::FootstepRange(500.0f, 500.0f, false, true, 600.0f), 600.0f);
+	TestEqual(TEXT("half speed: half range"), DinoNoiseRules::FootstepRange(250.0f, 500.0f, false, true, 600.0f), 300.0f);
+	TestEqual(TEXT("crouch-walking is silent"), DinoNoiseRules::FootstepRange(300.0f, 300.0f, true, true, 600.0f), 0.0f);
+	TestEqual(TEXT("in the air is silent (landing is its own noise)"), DinoNoiseRules::FootstepRange(500.0f, 500.0f, false, false, 600.0f), 0.0f);
+	TestEqual(TEXT("barely moving is silent"), DinoNoiseRules::FootstepRange(30.0f, 500.0f, false, true, 600.0f), 0.0f);
+	TestEqual(TEXT("faster than max clamps"), DinoNoiseRules::FootstepRange(900.0f, 500.0f, false, true, 600.0f), 600.0f);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDinoCrouchStealthTest, "DinoGame.AI.Target.CrouchingHides", DinoTestFlags)
+bool FDinoCrouchStealthTest::RunTest(const FString& Parameters)
+{
+	TestEqual(TEXT("standing: full range"), DinoTargetRules::StealthRange(4000.0f, false, 0.6f), 4000.0f);
+	TestEqual(TEXT("crouched: the factor of it"), DinoTargetRules::StealthRange(4000.0f, true, 0.6f), 2400.0f);
+	TestEqual(TEXT("close sense crouched: 3 m to 1.5 m"), DinoTargetRules::StealthRange(300.0f, true, 0.5f), 150.0f);
+	TestEqual(TEXT("a factor above 1 never reveals more"), DinoTargetRules::StealthRange(4000.0f, true, 2.0f), 4000.0f);
+	TestEqual(TEXT("a negative factor clamps to hidden"), DinoTargetRules::StealthRange(4000.0f, true, -1.0f), 0.0f);
 	return true;
 }
 

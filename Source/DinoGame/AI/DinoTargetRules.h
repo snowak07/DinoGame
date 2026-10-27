@@ -53,6 +53,15 @@ namespace DinoTargetRules
 	}
 
 	/**
+	 * A range that crouching shortens - sight, and the close-range sense. Factor is the fraction
+	 * left while crouched (dino.Stealth.*), clamped to 0-1 so tuning can only ever hide, not reveal.
+	 */
+	inline float StealthRange(float Range, bool bCrouched, float CrouchFactor)
+	{
+		return bCrouched ? Range * FMath::Clamp(CrouchFactor, 0.0f, 1.0f) : Range;
+	}
+
+	/**
 	 * Whether something heard or felt makes a creature investigate it. Only when it is not
 	 * already committed: a hunting or attacking creature ignores it, so a sound never pulls it
 	 * off the player it is chasing.

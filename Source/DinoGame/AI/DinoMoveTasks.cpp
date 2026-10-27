@@ -15,14 +15,19 @@ namespace
 	FAIMoveRequest MakeChaseRequest(const FStateTreeMoveToTaskInstanceData& Settings,
 		const ADinoAIControllerBase& Controller, AActor* Target)
 	{
+		// Partial paths, and an end allowed off the navmesh, whatever the node says: the stock
+		// defaults (end must be navigable) mean a player standing anywhere this creature cannot -
+		// a gap between bushes, a ledge, a nook - gets no path at all, and the creature stood
+		// still ten metres away re-asking. With these, the path runs to the closest point it can
+		// reach, and it waits there.
 		FAIMoveRequest Request;
 		Request.SetNavigationFilter(Settings.FilterClass ? Settings.FilterClass : Controller.GetDefaultNavigationFilterClass())
-			.SetAllowPartialPath(Settings.bAllowPartialPath)
+			.SetAllowPartialPath(true)
 			.SetAcceptanceRadius(Settings.AcceptableRadius)
 			.SetCanStrafe(Settings.bAllowStrafe)
 			.SetReachTestIncludesAgentRadius(Settings.bReachTestIncludesAgentRadius)
 			.SetReachTestIncludesGoalRadius(Settings.bReachTestIncludesGoalRadius)
-			.SetRequireNavigableEndLocation(Settings.bRequireNavigableEndLocation)
+			.SetRequireNavigableEndLocation(false)
 			.SetProjectGoalLocation(Settings.bProjectGoalLocation)
 			.SetUsePathfinding(true);
 		Request.SetGoalActor(Target);
@@ -133,6 +138,23 @@ EStateTreeRunStatus FDinoSearchStepTask::EnterState(FStateTreeExecutionContext& 
 
 	InstanceData.TargetActor = nullptr;
 	InstanceData.Destination = Controller->GetNextSearchPoint();
+
+	// As close as it can get. Whatever chose the spot - a noise, a player felt up close, where
+	// one was last seen, the search query - it can be somewhere this creature cannot stand, and a
+	// move there fails before it starts.
+	// Measured flat: a spot taken at a player's body height sits a metre above the navmesh below
+	// it, and that is not a gap - only a sideways shortfall means the creature cannot get there.
+	FVector Reachable;
+	if (Controller->ResolveReachablePoint(InstanceData.Destination, Reachable))
+	{
+		const float Shortfall = FVector::Dist2D(Reachable, InstanceData.Destination);
+		if (Shortfall > 50.0f)
+		{
+			UE_LOG(LogDinoGame, Log, TEXT("%s search spot %s is out of reach; going to the closest reachable point %s (%.1f m short)."),
+				*Controller->GetName(), *InstanceData.Destination.ToCompactString(), *Reachable.ToCompactString(), Shortfall / 100.0f);
+		}
+		InstanceData.Destination = Reachable;
+	}
 
 	// Recorded before the prefetch below overwrites the candidate, so debug draw shows the
 	// destination being walked to rather than the one queued behind it.
