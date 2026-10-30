@@ -186,6 +186,17 @@ public:
 	void DinoHitDino(float Damage = 25.0f);
 
 	/**
+	 * Host: puts you down, as a raptor's bite would - through the same damage path - so going
+	 * down, bleeding out and the screens can be tested solo.
+	 */
+	UFUNCTION(Exec)
+	void DinoDown();
+
+	/** Host: stands you back up from down, through the same revive path a teammate's revive uses. */
+	UFUNCTION(Exec)
+	void DinoRevive();
+
+	/**
 	 * Vision test on every creature: "DinoVisionTest on", "DinoVisionTest off", or no argument to
 	 * toggle. Creatures freeze where they stand and show, moment to moment, whether they can see
 	 * you - see ADinoAIControllerBase::SetVisionTest.
@@ -254,6 +265,9 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<class UDinoSpectatorOverlay> SpectatorOverlay;
+
+	UPROPERTY(Transient)
+	TObjectPtr<class UDinoDownedOverlay> DownedOverlay;
 
 	void ShowMainMenu();
 	void OpenSessionMenu();

@@ -17,6 +17,7 @@
 #include "Camera/PlayerCameraManager.h"
 #include "TimerManager.h"
 #include "UI/DinoSessionMenu.h"
+#include "UI/DinoDownedOverlay.h"
 #include "UI/DinoSpectatorOverlay.h"
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
@@ -307,7 +308,25 @@ void ADinoPlayerController::HandlePlayerStatusChanged(ADinoPlayerState* ChangedP
 	const bool bDied = NewStatus == EDinoPlayerStatus::Dead
 		&& (OldStatus == EDinoPlayerStatus::Alive || OldStatus == EDinoPlayerStatus::Downed);
 
-	if (!IsLocalController() || !bDied || !ChangedPlayer || ChangedPlayer == PlayerState)
+	if (!IsLocalController() || !ChangedPlayer || ChangedPlayer == PlayerState)
+	{
+		return;
+	}
+
+	// Teammates going down and getting back up: the cue to go and help, and that it worked.
+	if (NewStatus == EDinoPlayerStatus::Downed)
+	{
+		DinoScreenLog(FString::Printf(TEXT("%s is down! Hold E next to them to revive."), *ChangedPlayer->GetPlayerName()),
+			FColor(240, 150, 40), 6.0f);
+		return;
+	}
+	if (OldStatus == EDinoPlayerStatus::Downed && NewStatus == EDinoPlayerStatus::Alive)
+	{
+		DinoScreenLog(FString::Printf(TEXT("%s is back up."), *ChangedPlayer->GetPlayerName()), FColor(120, 220, 120), 4.0f);
+		return;
+	}
+
+	if (!bDied)
 	{
 		return;
 	}
@@ -469,6 +488,17 @@ void ADinoPlayerController::PollSessionUI()
 	else if (!bWantOverlay && bHasOverlay)
 	{
 		SpectatorOverlay->RemoveFromParent();
+	}
+
+	// Down and revive prompts: always up during a round - it shows nothing when there is nothing
+	// to say. Re-added after a seamless restart, which removes widgets but keeps this controller.
+	if (!DownedOverlay)
+	{
+		DownedOverlay = CreateWidget<UDinoDownedOverlay>(this, UDinoDownedOverlay::StaticClass());
+	}
+	if (DownedOverlay && !DownedOverlay->IsInViewport() && CurrentState == MatchState::InProgress)
+	{
+		DownedOverlay->AddToViewport(1);
 	}
 }
 
@@ -918,6 +948,32 @@ void ADinoPlayerController::DinoVisionTest(const FString& Mode)
 		? FString::Printf(TEXT("Vision test ON for %d creature(s): frozen, no memory. Green line = sees you, red = can't (with the reason)."), Creatures.Num())
 		: FString::Printf(TEXT("Vision test OFF for %d creature(s): normal AI resumed."), Creatures.Num()),
 		FColor(255, 220, 60), 8.0f);
+}
+
+void ADinoPlayerController::DinoDown()
+{
+	ADinoCharacter* Me = Cast<ADinoCharacter>(GetPawn());
+	if (!HasAuthority() || !Me || !Me->IsStanding())
+	{
+		DinoScreenError(TEXT("DinoDown: host only, and you need to be standing in a round."));
+		return;
+	}
+
+	DinoScreenLog(TEXT("DinoDown: as if bitten down."), FColor(240, 200, 80), 4.0f);
+	UGameplayStatics::ApplyDamage(Me, Me->GetCurrentHealth() + 1.0f, this, Me, UDinoDamageType_Bite::StaticClass());
+}
+
+void ADinoPlayerController::DinoRevive()
+{
+	ADinoGameMode* GameMode = GetWorld() ? GetWorld()->GetAuthGameMode<ADinoGameMode>() : nullptr;
+	const ADinoCharacter* Me = Cast<ADinoCharacter>(GetPawn());
+	if (!HasAuthority() || !GameMode || !Me || !Me->IsDowned())
+	{
+		DinoScreenError(TEXT("DinoRevive: host only, and you need to be down."));
+		return;
+	}
+
+	GameMode->RevivePlayer(this, this);
 }
 
 void ADinoPlayerController::DinoHitDino(float Damage)

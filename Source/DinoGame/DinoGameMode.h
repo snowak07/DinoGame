@@ -84,6 +84,22 @@ public:
 	void RefreshVoiceRules();
 
 	/**
+	 * The player-status side of going down: status Downed, logged, and then the check that
+	 * someone is still standing (BleedOutEveryoneIfNoOneStanding). Called by the body as it goes
+	 * down (ADinoCharacter::HandleDowned); the body has already stopped and started bleeding.
+	 */
+	void DownPlayer(AController* Victim, TSubclassOf<UDamageType> Cause);
+
+	/** A finished revive: status back to Alive and the body back on its feet, at dino.Downed.ReviveHealth. */
+	void RevivePlayer(AController* Reviver, AController* Revived);
+
+	/**
+	 * With nobody standing, nobody can revive anyone (DinoHealthRules::ShouldBleedOutEveryone):
+	 * everyone still down dies now, as BleedOut, and the round ends as it would for a last death.
+	 */
+	void BleedOutEveryoneIfNoOneStanding();
+
+	/**
 	 * GameplayUnmutePlayer, plus the listen-server host's missing unmute (see the definition).
 	 * bListenerIsHost: Listener is this machine's own player, whose mute list the server and
 	 * client halves share. bListenerMutedThem: they muted this speaker themselves in the Tab

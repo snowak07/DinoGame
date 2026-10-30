@@ -5,6 +5,8 @@
 #include "DinoGame.h"
 #include "DinoGameState.h"
 #include "DinoPlayerController.h"
+#include "DinoDowned.h"
+#include "DinoHealthRules.h"
 #include "DinoPlayerState.h"
 #include "DinoSpectatorPawn.h"
 #include "Engine/GameInstance.h"
@@ -262,6 +264,76 @@ void ADinoGameMode::BeginSpectating(APlayerController* Player)
 	Player->ClientGotoState(NAME_Spectating);
 }
 
+void ADinoGameMode::DownPlayer(AController* Victim, TSubclassOf<UDamageType> Cause)
+{
+	ADinoPlayerState* VictimState = Victim ? Victim->GetPlayerState<ADinoPlayerState>() : nullptr;
+	if (!VictimState || VictimState->GetStatus() != EDinoPlayerStatus::Alive)
+	{
+		return;
+	}
+
+	VictimState->SetStatus(EDinoPlayerStatus::Downed);
+	UE_LOG(LogDinoNet, Log, TEXT("%s is down (%s)."), *VictimState->GetPlayerName(), *UDinoDamageType::NameOf(Cause));
+
+	BleedOutEveryoneIfNoOneStanding();
+}
+
+void ADinoGameMode::RevivePlayer(AController* Reviver, AController* Revived)
+{
+	ADinoPlayerState* RevivedState = Revived ? Revived->GetPlayerState<ADinoPlayerState>() : nullptr;
+	ADinoCharacter* Body = Revived ? Cast<ADinoCharacter>(Revived->GetPawn()) : nullptr;
+	if (!RevivedState || RevivedState->GetStatus() != EDinoPlayerStatus::Downed || !Body)
+	{
+		return;
+	}
+
+	// Body first: its own transition logs and restores movement, then the status says so.
+	Body->Revive(DinoDowned::ReviveHealthFraction());
+	RevivedState->SetStatus(EDinoPlayerStatus::Alive);
+
+	const APlayerState* ReviverState = Reviver ? Reviver->PlayerState : nullptr;
+	UE_LOG(LogDinoNet, Log, TEXT("%s was revived by %s."), *RevivedState->GetPlayerName(),
+		ReviverState ? *ReviverState->GetPlayerName() : TEXT("?"));
+}
+
+void ADinoGameMode::BleedOutEveryoneIfNoOneStanding()
+{
+	if (!IsMatchInProgress() || !GameState)
+	{
+		return;
+	}
+
+	int32 Standing = 0;
+	TArray<AController*> Downed;
+	for (APlayerState* State : GameState->PlayerArray)
+	{
+		const ADinoPlayerState* Player = Cast<ADinoPlayerState>(State);
+		if (!Player)
+		{
+			continue;
+		}
+		if (Player->GetStatus() == EDinoPlayerStatus::Alive)
+		{
+			++Standing;
+		}
+		else if (Player->GetStatus() == EDinoPlayerStatus::Downed && Player->GetOwningController())
+		{
+			Downed.Add(Player->GetOwningController());
+		}
+	}
+
+	if (!DinoHealthRules::ShouldBleedOutEveryone(Standing, Downed.Num()))
+	{
+		return;
+	}
+
+	UE_LOG(LogDinoNet, Log, TEXT("Nobody is left standing to revive %d downed player(s); they bleed out."), Downed.Num());
+	for (AController* Player : Downed)
+	{
+		KillPlayer(Player, UDinoDamageType_BleedOut::StaticClass());
+	}
+}
+
 void ADinoGameMode::KillPlayer(AController* Victim, TSubclassOf<UDamageType> Cause)
 {
 	ADinoPlayerState* VictimState = Victim ? Victim->GetPlayerState<ADinoPlayerState>() : nullptr;
@@ -289,6 +361,9 @@ void ADinoGameMode::KillPlayer(AController* Victim, TSubclassOf<UDamageType> Cau
 	// 4. One line per death, on the host, with what did it.
 	UE_LOG(LogDinoNet, Log, TEXT("%s %s (%s)."), *VictimState->GetPlayerName(),
 		*UDinoDamageType::DescribeDeath(Cause), *UDinoDamageType::NameOf(Cause));
+
+	// The last one standing dying leaves anyone still down with nobody to revive them.
+	BleedOutEveryoneIfNoOneStanding();
 
 	APlayerController* Player = Cast<APlayerController>(Victim);
 	if (!Player)
