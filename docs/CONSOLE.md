@@ -28,6 +28,8 @@ counts as the host. With several PIE players, use the server's window.
 | `DinoSetState <state>` | yes | Force every creature into a state and lock it there |
 | `DinoSetState auto` | yes | Release the lock; perception takes over again |
 | `DinoHitDino [damage]` | yes | Hit the nearest living creature. Damage defaults to 25 |
+| `DinoDown` | yes | Put yourself down, as a raptor's bite would. Needs a second player still standing: alone, nobody is left to revive you, so you bleed out at once and the round ends |
+| `DinoRevive` | yes | Stand yourself back up from down, as a teammate's revive would |
 | `DinoVisionTest [on\|off]` | yes | Freeze every creature and show, moment to moment, whether it can see you. No argument toggles |
 | `DinoNoise [loudness]` | no | Make a noise where you stand, as if you spoke at that loudness: 0 whisper to 1 shout, default 0.5. Creatures in earshot come to investigate. For testing without a mic (Play In Editor has none) |
 
@@ -71,6 +73,11 @@ Draws on the host whether or not debug draw is on.
 | `dino.Noise.LandingRange 1000` | How far (cm) landing from a jump or a fall carries. Host |
 | `dino.Stealth.CrouchSightFactor 0.6` | A crouched player is seen only within this fraction of a creature's sight range. Host |
 | `dino.Stealth.CrouchCloseSenseFactor 0.5` | A crouched player is felt only within this fraction of the 3 m close sense. Host |
+| `dino.Downed.BleedOutSeconds 45` | How long a downed player lasts untouched. Damage while down shortens it. Host |
+| `dino.Downed.ReviveSeconds 4` | How long the revive key has to be held. Host |
+| `dino.Downed.ReviveRange 200` | How close (cm) a reviver has to stay. Host |
+| `dino.Downed.ReviveHealth 0.2` | Share of max health a revived player stands up with. Host |
+| `dino.AI.FlaredVictimIgnoreSeconds 10` | How long a raptor shot off its victim leaves that victim alone. Host |
 
 | `dino.Noise.Debug 1` | Draw how far voices carry (also on with `DinoAI.DebugDraw`). See below |
 
@@ -200,6 +207,14 @@ thing to do in any solo test.
 |---|---|
 | **LMB** (right trigger) | Fire a flare, at most once every 1.5 s. Knocks a raptor off a pinned player |
 | **Left Ctrl** (hold) / **C** (toggle, right stick click) | Crouch: lowers your view, silences your footsteps, and makes you harder to see and feel |
+| **E** (hold; gamepad X / left face button) | Revive a downed teammate in front of you, within 2 m. Keep holding for 4 s |
+
+**Going down.** A raptor's bite takes your health to zero and puts you **down**, not dead: you
+lie on your back as when pinned, unable to move or shoot, with your view held to a little room
+either side (you can still talk), and a red bar shows how long you have (45 s, less while a
+raptor keeps biting). You stay down if the raptor is shot off you. A teammate holding E next to you stands you back up at 20% health. A
+T-Rex's bite and falls kill outright. If nobody is left standing, everyone still down bleeds out
+and the round ends. Shooting a raptor off a downed player makes it leave them alone for 10 s.
 | **Tab** | The session menu |
 
 ### Spectator controls

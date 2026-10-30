@@ -7,6 +7,9 @@
 #include "AI/DinoStealth.h"
 #include "AI/DinoTargetRules.h"
 #include "AISystem.h"
+#include "DinoDowned.h"
+#include "DinoHealthRules.h"
+#include "EngineUtils.h"
 #include "TimerManager.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -81,6 +84,12 @@ void ADinoCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompo
 	CharacterInputContext->MapKey(CrouchToggleAction, EKeys::C);
 	CharacterInputContext->MapKey(CrouchToggleAction, EKeys::Gamepad_RightThumbstick);
 
+	// Revive: held, like the hold-to-crouch. Started and Completed are press and release.
+	ReviveAction = NewObject<UInputAction>(this, TEXT("Revive"));
+	ReviveAction->ValueType = EInputActionValueType::Boolean;
+	CharacterInputContext->MapKey(ReviveAction, EKeys::E);
+	CharacterInputContext->MapKey(ReviveAction, EKeys::Gamepad_FaceButton_Left);
+
 	if (const ULocalPlayer* LocalPlayer = PC->GetLocalPlayer())
 	{
 		if (UEnhancedInputLocalPlayerSubsystem* Subsystem = LocalPlayer->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>())
@@ -91,6 +100,8 @@ void ADinoCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompo
 		}
 	}
 
+	Input->BindAction(ReviveAction, ETriggerEvent::Started, this, &ADinoCharacter::HandleRevivePressed);
+	Input->BindAction(ReviveAction, ETriggerEvent::Completed, this, &ADinoCharacter::HandleReviveReleased);
 	Input->BindAction(CrouchHoldAction, ETriggerEvent::Started, this, &ADinoCharacter::HandleCrouchPressed);
 	Input->BindAction(CrouchHoldAction, ETriggerEvent::Completed, this, &ADinoCharacter::HandleCrouchReleased);
 	Input->BindAction(CrouchToggleAction, ETriggerEvent::Started, this, &ADinoCharacter::HandleCrouchToggled);
@@ -112,7 +123,7 @@ void ADinoCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 bool ADinoCharacter::CanUseCrouchInput() const
 {
-	return IsAlive() && !IsRestrained();
+	return IsStanding() && !IsRestrained();
 }
 
 void ADinoCharacter::HandleCrouchPressed()
@@ -179,7 +190,10 @@ void ADinoCharacter::OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightA
 		ApplyPinnedPose();
 	}
 
-	CrouchViewDropTarget = 0.0f;
+	if (!IsDowned())
+	{
+		CrouchViewDropTarget = 0.0f;
+	}
 }
 
 void ADinoCharacter::NotifyControllerChanged()
@@ -196,6 +210,15 @@ void ADinoCharacter::Tick(float DeltaSeconds)
 }
 
 void ADinoCharacter::BeginCrouchView()
+{
+	// Downed outranks a crouch: the view stays down at the downed height.
+	if (!IsDowned())
+	{
+		BeginLoweredView(CrouchedViewHeight);
+	}
+}
+
+void ADinoCharacter::BeginLoweredView(float ViewHeight)
 {
 	if (!IsLocallyControlled())
 	{
@@ -214,10 +237,10 @@ void ADinoCharacter::BeginCrouchView()
 	// engine already moved. The drop is whatever is left to reach CrouchedViewHeight.
 	const float FeetZ = Capsule->GetComponentLocation().Z - Capsule->GetScaledCapsuleHalfHeight();
 	const float RawHeight = Camera->GetComponentLocation().Z + CrouchViewDrop - FeetZ;
-	CrouchViewDropTarget = FMath::Max(0.0f, RawHeight - CrouchedViewHeight);
+	CrouchViewDropTarget = FMath::Max(0.0f, RawHeight - ViewHeight);
 
-	UE_LOG(LogDinoGame, Log, TEXT("Crouch: view lowering %.0f cm (camera %.0f cm above the floor, crouched view %.0f cm)."),
-		CrouchViewDropTarget, RawHeight, CrouchedViewHeight);
+	UE_LOG(LogDinoGame, Log, TEXT("%s: view lowering %.0f cm (camera %.0f cm above the floor, wanted %.0f cm)."),
+		TEXT("Crouch"), CrouchViewDropTarget, RawHeight, ViewHeight);
 }
 
 void ADinoCharacter::UpdateCrouchView(float DeltaSeconds)
@@ -363,7 +386,8 @@ void ADinoCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLi
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
-	DOREPLIFETIME(ADinoCharacter, CurrentHealth);
+	DOREPLIFETIME(ADinoCharacter, Vitals);
+	DOREPLIFETIME(ADinoCharacter, ReviveState);
 	DOREPLIFETIME(ADinoCharacter, Restraint);
 }
 
@@ -373,7 +397,7 @@ void ADinoCharacter::BeginPlay()
 
 	if (HasAuthority())
 	{
-		CurrentHealth = MaxHealth;
+		Vitals = FDinoVitalsState{ MaxHealth, false, 0.0f };
 
 		// Every player's footsteps, judged where movement is authoritative, so the host and
 		// clients make noise by the same rule, in Play In Editor and packaged alike.
@@ -466,11 +490,26 @@ float ADinoCharacter::TakeDamage(float Damage, const FDamageEvent& DamageEvent, 
 		return 0.0f;
 	}
 
-	PendingDeathCause = DamageEvent.DamageTypeClass;
+	const FDinoVitalsState Old = Vitals;
+	DinoHealthRules::FVitals Next{ Vitals.Health, Vitals.bDowned, Vitals.BleedOut };
+	const DinoHealthRules::EChange Change = DinoHealthRules::ApplyDamage(Next, ActualDamage,
+		UDinoDamageType::Downs(DamageEvent.DamageTypeClass));
+	if (Change == DinoHealthRules::EChange::None)
+	{
+		return 0.0f;
+	}
 
-	const float OldHealth = CurrentHealth;
-	CurrentHealth = FMath::Max(0.0f, CurrentHealth - ActualDamage);
-	ApplyHealthChange(OldHealth);
+	if (Change == DinoHealthRules::EChange::Died)
+	{
+		PendingDeathCause = DamageEvent.DamageTypeClass;
+	}
+	else if (Change == DinoHealthRules::EChange::Downed)
+	{
+		PendingDownCause = DamageEvent.DamageTypeClass;
+	}
+
+	Vitals = FDinoVitalsState{ Next.Health, Next.bDowned, Next.BleedOut };
+	ApplyVitalsChange(Old);
 
 	return ActualDamage;
 }
@@ -484,9 +523,9 @@ void ADinoCharacter::Die(TSubclassOf<UDamageType> Cause)
 
 	PendingDeathCause = Cause;
 
-	const float OldHealth = CurrentHealth;
-	CurrentHealth = 0.0f;
-	ApplyHealthChange(OldHealth);
+	const FDinoVitalsState Old = Vitals;
+	Vitals = FDinoVitalsState{ 0.0f, false, 0.0f };
+	ApplyVitalsChange(Old);
 }
 
 void ADinoCharacter::FellOutOfWorld(const UDamageType& DamageType)
@@ -512,42 +551,320 @@ void ADinoCharacter::FellOutOfWorld(const UDamageType& DamageType)
 
 void ADinoCharacter::Heal(float Amount)
 {
-	if (!HasAuthority() || Amount <= 0.0f || !IsAlive())
+	if (!HasAuthority() || Amount <= 0.0f || !IsStanding())
 	{
 		return;
 	}
 
-	const float OldHealth = CurrentHealth;
-	CurrentHealth = FMath::Min(MaxHealth, CurrentHealth + Amount);
-	ApplyHealthChange(OldHealth);
+	const FDinoVitalsState Old = Vitals;
+	Vitals.Health = FMath::Min(MaxHealth, Vitals.Health + Amount);
+	ApplyVitalsChange(Old);
 }
 
-void ADinoCharacter::OnRep_CurrentHealth(float OldHealth)
+void ADinoCharacter::Revive(float HealthFraction)
 {
-	ApplyHealthChange(OldHealth);
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	const FDinoVitalsState Old = Vitals;
+	DinoHealthRules::FVitals Next{ Vitals.Health, Vitals.bDowned, Vitals.BleedOut };
+	if (DinoHealthRules::Revive(Next, MaxHealth, HealthFraction))
+	{
+		Vitals = FDinoVitalsState{ Next.Health, Next.bDowned, Next.BleedOut };
+		ApplyVitalsChange(Old);
+	}
 }
 
-void ADinoCharacter::ApplyHealthChange(float OldHealth)
+void ADinoCharacter::OnRep_Vitals(const FDinoVitalsState& OldVitals)
 {
-	// Reached from OnRep on simulated proxies and called directly on the authority, since a
+	ApplyVitalsChange(OldVitals);
+}
+
+void ADinoCharacter::ApplyVitalsChange(const FDinoVitalsState& Old)
+{
+	// Reached from OnRep on other machines and called directly on the authority, since a
 	// RepNotify never fires on the machine that wrote the value.
-	OnHealthChanged.Broadcast(CurrentHealth, CurrentHealth - OldHealth);
+	if (HasAuthority())
+	{
+		ForceNetUpdate();
+	}
+
+	OnHealthChanged.Broadcast(Vitals.Health, Vitals.Health - Old.Health);
 
 	// There is no health HUD yet, so without this a player has no way to know they were hit
 	// short of reading the log. Local only: DinoScreenLog prints on whichever machine calls it,
 	// and on a listen server the host would otherwise see every client's damage.
-	if (IsLocallyControlled() && CurrentHealth < OldHealth && CurrentHealth > 0.0f)
+	if (IsLocallyControlled() && Vitals.Health < Old.Health && Vitals.Health > 0.0f)
 	{
 		DinoScreenLog(FString::Printf(TEXT("Hit for %.0f  (%.0f / %.0f)"),
-			OldHealth - CurrentHealth, CurrentHealth, MaxHealth), FColor(240, 150, 40), 3.0f);
+			Old.Health - Vitals.Health, Vitals.Health, MaxHealth), FColor(240, 150, 40), 3.0f);
 	}
 
-	if (CurrentHealth <= 0.0f && OldHealth > 0.0f)
+	const bool bWasAlive = Old.Health > 0.0f || Old.bDowned;
+
+	if (!Old.bDowned && Vitals.bDowned)
 	{
-		UE_LOG(LogDinoGame, Log, TEXT("%s died."), *GetName());
+		HandleDowned();
+	}
+	else if (Old.bDowned && !Vitals.bDowned && IsAlive())
+	{
+		HandleRevived();
+	}
+
+	if (Vitals.bDowned && Vitals.BleedOut < Old.BleedOut)
+	{
+		LogBleedOut();
+	}
+
+	if (bWasAlive && !IsAlive())
+	{
+		UE_LOG(LogDinoGame, Log, TEXT("%s died%s."), *GetName(), Old.bDowned ? TEXT(" while down") : TEXT(""));
 		HandleDeath();
 		OnDied.Broadcast();
 	}
+}
+
+void ADinoCharacter::HandleDowned()
+{
+	// The same on every machine, so the downed player's own client stops predicting movement at
+	// the moment the server stops accepting it.
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
+		// Stand the capsule up first, as a pin does (ApplyRestraintChange): the pose is placed from
+		// the capsule's height, and a crouch left on would carry through to the revive.
+		if (bIsCrouched && (HasAuthority() || IsLocallyControlled()))
+		{
+			Movement->bWantsToCrouch = false;
+			Movement->UnCrouch(false);
+		}
+		Movement->StopMovementImmediately();
+		Movement->DisableMovement();
+	}
+
+	// Down is the pinned pose: on their back, the view held. Usually they are already in it,
+	// downed by the raptor pinning them, and this only re-aims the view. The pose then stays
+	// until a revive, whatever happens to the pin (ApplyRestraintChange).
+	ApplyPinnedPose();
+	UE_LOG(LogDinoGame, Log, TEXT("%s: down - lying on the ground, movement off%s%s."), *GetName(),
+		IsRestrained() ? TEXT(", still pinned") : TEXT(""), IsLocallyControlled() ? TEXT(", view held") : TEXT(""));
+
+	if (IsLocallyControlled())
+	{
+		DinoScreenLog(TEXT("You're down. Hold on - a teammate can revive you."), FColor(220, 60, 50), 6.0f);
+	}
+
+	if (HasAuthority())
+	{
+		LastBleedQuarterLogged = 4;
+		UE_LOG(LogDinoGame, Log, TEXT("%s is down (%s); bleeding out over %.0f s."), *GetName(),
+			*UDinoDamageType::NameOf(PendingDownCause), DinoDowned::BleedOutSeconds());
+		GetWorldTimerManager().SetTimer(BleedTimer, this, &ADinoCharacter::BleedTick, 0.1f, true);
+
+		if (ADinoGameMode* GameMode = GetWorld() ? GetWorld()->GetAuthGameMode<ADinoGameMode>() : nullptr)
+		{
+			GameMode->DownPlayer(GetController(), PendingDownCause);
+		}
+	}
+}
+
+void ADinoCharacter::HandleRevived()
+{
+	// A revive needs the target free of any pin (DinoHealthRules::WhyCannotRevive), so nothing
+	// else still wants them lying down.
+	ClearPinnedPose();
+
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
+		Movement->SetMovementMode(MOVE_Walking);
+	}
+	UE_LOG(LogDinoGame, Log, TEXT("%s: revived - standing, movement on."), *GetName());
+
+	if (IsLocallyControlled())
+	{
+		if (bIsCrouched)
+		{
+			BeginCrouchView();
+		}
+		else
+		{
+			CrouchViewDropTarget = 0.0f;
+		}
+		DinoScreenLog(TEXT("You're back up."), FColor(120, 220, 120), 4.0f);
+	}
+
+	if (HasAuthority())
+	{
+		GetWorldTimerManager().ClearTimer(BleedTimer);
+		ReviveState = FDinoReviveState();
+		UE_LOG(LogDinoGame, Log, TEXT("%s is back up with %.0f health."), *GetName(), Vitals.Health);
+	}
+}
+
+void ADinoCharacter::BleedTick()
+{
+	if (!Vitals.bDowned)
+	{
+		GetWorldTimerManager().ClearTimer(BleedTimer);
+		return;
+	}
+
+	const FDinoVitalsState Old = Vitals;
+	DinoHealthRules::FVitals Next{ Vitals.Health, Vitals.bDowned, Vitals.BleedOut };
+	if (DinoHealthRules::Bleed(Next, 0.1f, DinoDowned::BleedOutSeconds()) == DinoHealthRules::EChange::Died)
+	{
+		PendingDeathCause = UDinoDamageType_BleedOut::StaticClass();
+		GetWorldTimerManager().ClearTimer(BleedTimer);
+	}
+
+	Vitals = FDinoVitalsState{ Next.Health, Next.bDowned, Next.BleedOut };
+	ApplyVitalsChange(Old);
+}
+
+void ADinoCharacter::LogBleedOut()
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	const int32 Quarter = FMath::CeilToInt(Vitals.BleedOut / (DinoHealthRules::BleedOutFull / 4.0f));
+	if (Quarter < LastBleedQuarterLogged)
+	{
+		LastBleedQuarterLogged = Quarter;
+		UE_LOG(LogDinoGame, Log, TEXT("%s bleeding out: %.0f%% left%s."), *GetName(), Vitals.BleedOut,
+			ReviveState.Reviver ? *FString::Printf(TEXT(", %s reviving (%.0f%%)"), *ReviveState.Reviver->GetName(), ReviveState.Progress * 100.0f) : TEXT(""));
+	}
+}
+
+// --- Reviving -------------------------------------------------------------------------------
+
+ADinoCharacter* ADinoCharacter::FindReviveTarget() const
+{
+	const UWorld* World = GetWorld();
+	if (!World || !IsStanding())
+	{
+		return nullptr;
+	}
+
+	const FVector Facing = GetControlRotation().Vector().GetSafeNormal2D();
+	ADinoCharacter* Best = nullptr;
+	float BestDistance = DinoDowned::ReviveRange();
+	for (TActorIterator<ADinoCharacter> It(World); It; ++It)
+	{
+		ADinoCharacter* Other = *It;
+		if (Other == this || !Other->IsDowned() || Other->IsRestrained())
+		{
+			continue;
+		}
+
+		const FVector ToOther = Other->GetActorLocation() - GetActorLocation();
+		const float Distance = ToOther.Size2D();
+		if (Distance <= BestDistance && FVector::DotProduct(Facing, ToOther.GetSafeNormal2D()) >= 0.5f)
+		{
+			BestDistance = Distance;
+			Best = Other;
+		}
+	}
+	return Best;
+}
+
+void ADinoCharacter::HandleRevivePressed()
+{
+	if (ADinoCharacter* Target = FindReviveTarget())
+	{
+		ServerBeginRevive(Target);
+	}
+}
+
+void ADinoCharacter::HandleReviveReleased()
+{
+	ServerStopRevive();
+}
+
+void ADinoCharacter::ServerBeginRevive_Implementation(ADinoCharacter* Target)
+{
+	if (!IsValid(Target) || Target == this)
+	{
+		return;
+	}
+
+	StopReviving(nullptr);
+
+	// Someone else already at it: one reviver at a time.
+	if (Target->ReviveState.Reviver && Target->ReviveState.Reviver != this)
+	{
+		UE_LOG(LogDinoGame, Log, TEXT("Revive: %s can't revive %s - %s already is."), *GetName(), *Target->GetName(),
+			*Target->ReviveState.Reviver->GetName());
+		return;
+	}
+
+	ReviveTarget = Target;
+	Target->ReviveState = FDinoReviveState{ 0.0f, this };
+	Target->ForceNetUpdate();
+	UE_LOG(LogDinoGame, Log, TEXT("Revive: %s started reviving %s (%.0f s)."), *GetName(), *Target->GetName(), DinoDowned::ReviveSeconds());
+
+	GetWorldTimerManager().SetTimer(ReviveTimer, this, &ADinoCharacter::ReviveTick, 0.1f, true);
+	ReviveTick();
+}
+
+void ADinoCharacter::ServerStopRevive_Implementation()
+{
+	StopReviving(TEXT("let go"));
+}
+
+void ADinoCharacter::ReviveTick()
+{
+	ADinoCharacter* Target = ReviveTarget.Get();
+	if (!Target)
+	{
+		StopReviving(TEXT("they are gone"));
+		return;
+	}
+
+	const FVector ToTarget = Target->GetActorLocation() - GetActorLocation();
+	const float FacingDot = FVector::DotProduct(GetControlRotation().Vector().GetSafeNormal2D(), ToTarget.GetSafeNormal2D());
+	if (const TCHAR* Reason = DinoHealthRules::WhyCannotRevive(IsStanding(), IsRestrained(), Target->IsDowned(),
+		Target->IsRestrained(), ToTarget.Size2D(), DinoDowned::ReviveRange(), FacingDot, 0.5f))
+	{
+		StopReviving(Reason);
+		return;
+	}
+
+	Target->ReviveState.Progress = FMath::Min(1.0f, Target->ReviveState.Progress + 0.1f / FMath::Max(DinoDowned::ReviveSeconds(), 0.1f));
+	if (Target->ReviveState.Progress < 1.0f)
+	{
+		return;
+	}
+
+	UE_LOG(LogDinoGame, Log, TEXT("Revive: %s revived %s."), *GetName(), *Target->GetName());
+	GetWorldTimerManager().ClearTimer(ReviveTimer);
+	ReviveTarget.Reset();
+	if (ADinoGameMode* GameMode = GetWorld() ? GetWorld()->GetAuthGameMode<ADinoGameMode>() : nullptr)
+	{
+		GameMode->RevivePlayer(GetController(), Target->GetController());
+	}
+}
+
+void ADinoCharacter::StopReviving(const TCHAR* Reason)
+{
+	GetWorldTimerManager().ClearTimer(ReviveTimer);
+
+	ADinoCharacter* Target = ReviveTarget.Get();
+	ReviveTarget.Reset();
+	if (!Target || Target->ReviveState.Reviver != this)
+	{
+		return;
+	}
+
+	if (Reason)
+	{
+		UE_LOG(LogDinoGame, Log, TEXT("Revive: %s stopped reviving %s at %.0f%% - %s."), *GetName(), *Target->GetName(),
+			Target->ReviveState.Progress * 100.0f, Reason);
+	}
+	Target->ReviveState = FDinoReviveState();
+	Target->ForceNetUpdate();
 }
 
 void ADinoCharacter::HandleDeath()
@@ -709,20 +1026,23 @@ void ADinoCharacter::ApplyRestraintChange(const FDinoRestraintState& OldRestrain
 	}
 	else if (!bIsRestrained && bWasRestrained)
 	{
-		// Only the living stand back up. A pin ended by death leaves the pose - and the victim's
-		// lowered view - exactly where it was: the body is already hidden and is destroyed when
-		// spectating starts, and restoring it would pop the dying player's camera back up to
-		// standing height during the death beat. IsAlive() is reliable here in both orders: on a
-		// client, health and the pin arrive in the same update, and every replicated value is
-		// applied before any RepNotify runs.
-		if (IsAlive())
+		// Only a player still on their feet stands back up. A pin ended by death leaves the pose -
+		// and the victim's lowered view - exactly where it was: the body is already hidden and is
+		// destroyed when spectating starts, and restoring it would pop the dying player's camera
+		// back up to standing height during the death beat. A pin ended while down (the raptor
+		// shot off, or letting go) leaves them lying there too, until a revive (HandleRevived):
+		// testing IsAlive() here, which counts the downed, stood them up and let them run.
+		// IsStanding() is reliable here in both orders: on a client, health and the pin arrive in
+		// the same update, and every replicated value is applied before any RepNotify runs.
+		const bool bStandUp = IsStanding();
+		if (bStandUp)
 		{
 			ClearPinnedPose();
 		}
 
-		// Only a living player gets movement back. On death the restraint ends from inside
+		// Only a player on their feet gets movement back. On death the restraint ends from inside
 		// HandleDeath, after movement was disabled for good, and this must not undo that.
-		if (Movement && IsAlive())
+		if (Movement && bStandUp)
 		{
 			Movement->SetDefaultMovementMode();
 		}
@@ -733,9 +1053,16 @@ void ADinoCharacter::ApplyRestraintChange(const FDinoRestraintState& OldRestrain
 		}
 		RestraintInputController.Reset();
 
-		if (IsLocallyControlled() && IsAlive())
+		UE_LOG(LogDinoGame, Log, TEXT("%s: let go - %s."), *GetName(), bStandUp ? TEXT("standing up, movement on")
+			: IsDowned() ? TEXT("still down, stays lying with movement off") : TEXT("dead, pose left as it was"));
+
+		if (IsLocallyControlled() && bStandUp)
 		{
 			DinoScreenLog(TEXT("You're free - run."), FColor(120, 220, 120), 4.0f);
+		}
+		else if (IsLocallyControlled() && IsDowned())
+		{
+			DinoScreenLog(TEXT("It's off you. Stay down - a teammate can revive you."), FColor(220, 150, 60), 4.0f);
 		}
 
 		OnRestraintEnded();
@@ -755,11 +1082,18 @@ void ADinoCharacter::ApplyPinnedPose()
 
 	// Feet toward whatever has them, as it was when it caught them - see FDinoRestraintState.
 	// Horizontal, so the body lies flat even when the raptor caught them from a little higher up.
+	// Down with nothing holding them, they keep the way they already lie (a pin ended while
+	// down); down without ever being pinned, feet the way they were facing.
 	FVector ToCaptor = FVector(Restraint.Direction).GetSafeNormal2D();
+	if (ToCaptor.IsNearlyZero() && bPinnedPoseApplied)
+	{
+		ToCaptor = PoseDirection;
+	}
 	if (ToCaptor.IsNearlyZero())
 	{
 		ToCaptor = GetActorForwardVector().GetSafeNormal2D();
 	}
+	PoseDirection = ToCaptor;
 
 	// A first-person character turns its whole actor with the mouse. Left on, a pinned player
 	// looking around would spin their own body on the ground. Every machine runs this, so the
@@ -815,13 +1149,15 @@ void ADinoCharacter::ApplyPinnedPose()
 	// Turn the view onto the raptor and hold it there, with a little room to look around. Aimed
 	// at the spot the raptor is moving to, at its eye height, rather than at the raptor itself:
 	// at this moment it may still be mid-pounce, and on a client its move may not have arrived.
+	// The same spot as GetPinnedCaptorSpot while pinned; down with nothing on them, where one
+	// would stand - looking down their own body.
 	if (ADinoPlayerController* PC = Cast<ADinoPlayerController>(GetController()))
 	{
-		// A fallback for a captor not yet resolved on this client; about a raptor's eye height.
+		// A fallback for a captor not yet resolved on this client, or none; about a raptor's eye height.
 		constexpr float FallbackCaptorEyeHeight = 120.0f;
 		const ADinoCreature* Captor = Restraint.Captor;
 		const float CaptorEyeHeight = Captor ? Captor->GetEyeHeightAboveFeet() : FallbackCaptorEyeHeight;
-		const FVector LookAt = GetPinnedCaptorSpot() + FVector(0.0f, 0.0f, CaptorEyeHeight);
+		const FVector LookAt = Ground + ToCaptor * PinnedCaptorOffset + FVector(0.0f, 0.0f, CaptorEyeHeight);
 
 		PC->ConstrainView((LookAt - ViewFrom).Rotation(), PinnedLookYawLeeway, PinnedLookPitchLeeway);
 	}
@@ -843,6 +1179,7 @@ void ADinoCharacter::ClearPinnedPose()
 		return;
 	}
 	bPinnedPoseApplied = false;
+	PoseDirection = FVector::ZeroVector;
 
 	// ACharacter caches the mesh's offset from the capsule at startup, and its crouch code
 	// works from the same baseline - so restoring to it agrees with whatever crouch does next.

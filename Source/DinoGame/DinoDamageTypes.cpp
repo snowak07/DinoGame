@@ -3,6 +3,18 @@
 UDinoDamageType_Bite::UDinoDamageType_Bite()
 {
 	DeathDescription = TEXT("was mauled");
+	bDownsInsteadOfKilling = true;
+}
+
+UDinoDamageType_BleedOut::UDinoDamageType_BleedOut()
+{
+	DeathDescription = TEXT("bled out");
+}
+
+bool UDinoDamageType::Downs(TSubclassOf<UDamageType> Cause)
+{
+	const UDinoDamageType* Dino = Cause ? Cast<UDinoDamageType>(Cause->GetDefaultObject()) : nullptr;
+	return Dino && Dino->bDownsInsteadOfKilling;
 }
 
 UDinoDamageType_Devour::UDinoDamageType_Devour()

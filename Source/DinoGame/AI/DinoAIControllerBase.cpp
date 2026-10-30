@@ -1,6 +1,7 @@
 ﻿#include "AI/DinoAIControllerBase.h"
 
 #include "AI/DinoStealth.h"
+#include "DinoDowned.h"
 #include "AI/DinoTargetRules.h"
 
 #include "AI/DinoAttackComponent.h"
@@ -210,6 +211,12 @@ bool ADinoAIControllerBase::IsValidTarget(const AActor* Actor) const
 	// Held by someone else. Held by this creature is still a valid target - it is the one being
 	// attacked.
 	if (Player->IsRestrained() && Player->GetRestrainingCreature() != GetPawn())
+	{
+		return false;
+	}
+
+	// The player a flare just shot it off - left alone for a while, so a revive is possible.
+	if (Player == FlaredOffVictim.Get() && GetWorld() && GetWorld()->GetTimeSeconds() < FlaredOffVictimUntil)
 	{
 		return false;
 	}
@@ -692,6 +699,15 @@ bool ADinoAIControllerBase::Investigate(const FVector& Location, AActor* Source,
 
 	if (bForce && IsEngagedInAttack())
 	{
+		// Shot off someone it was holding: leave them be for a while.
+		if (ADinoCharacter* Victim = AttackComponent ? AttackComponent->GetHeldVictim() : nullptr)
+		{
+			FlaredOffVictim = Victim;
+			FlaredOffVictimUntil = World->GetTimeSeconds() + DinoDowned::FlaredVictimIgnoreSeconds();
+			UE_LOG(LogDinoGame, Log, TEXT("%s was shot off %s; leaving them alone for %.0f s."), *GetName(),
+				*Victim->GetName(), DinoDowned::FlaredVictimIgnoreSeconds());
+		}
+
 		bHasPendingForcedInvestigation = true;
 		PendingInvestigationLocation = Location;
 		PendingInvestigationSource = Source;

@@ -208,6 +208,36 @@ spectating, the round end, the Tab menu and, next, voice all read it.
 - **Anything that must happen in order stays a step inside `KillPlayer`**, not a separate
   listener. Unreal does not guarantee listener order.
 
+### Downed and revive
+
+The rules are `DinoHealthRules` (plain functions, unit tested); tuning is `dino.Downed.*`.
+Damage that downs (`UDinoDamageType::bDownsInsteadOfKilling`, the raptor's Bite) takes health
+to zero and the player goes **down**: a second meter, bleed-out, drains on its own and from
+further damage, and at zero they die (`UDinoDamageType_BleedOut` if it ran out on its own).
+Damage that does not down kills outright, down or not.
+
+- **Health, downed and bleed-out replicate as one struct** (`FDinoVitalsState`), and every
+  transition runs from `ADinoCharacter::ApplyVitalsChange` on every machine, comparing before and
+  after. As separate properties, a client could see health hit zero a frame before "downed" and
+  play a death that never happened.
+- **`IsAlive()` means not dead**: standing *or* down. `IsStanding()` is "on their feet". Anything
+  a downed player cannot do (move, crouch, shoot, revive others) checks `IsStanding`. Testing
+  `IsAlive` where `IsStanding` was meant let a downed player run off once a pin on them ended.
+- **Down is the pinned pose** (`ApplyPinnedPose`): on their back, movement off, the view held.
+  It stays until `HandleRevived`, whatever happens to a pin, so a pin ending while down
+  (`ApplyRestraintChange`) leaves them lying where they are.
+- **The body leads, the status follows.** `HandleDowned` calls `ADinoGameMode::DownPlayer`, as
+  `HandleDeath` calls `KillPlayer`; `RevivePlayer` revives the body, then sets the status.
+- **Nobody standing means nobody can revive**: `BleedOutEveryoneIfNoOneStanding` kills everyone
+  still down at once, so the round ends instead of waiting out their bleed-out. It runs after
+  every down and every death.
+- **Reviving is checked by the server every tick** (`ReviveTick`, `DinoHealthRules::
+  WhyCannotRevive`) and every stop is logged with its reason. The key only starts and stops it.
+- **A raptor shot off its victim ignores that victim for a while** (`FlaredOffVictim`), or it
+  came straight back to finish them before a revive could happen.
+- The bare unit-test world has no game mode, and the engine refuses all damage to a pawn without
+  one (`APawn::ShouldTakeDamage`). Character tests spawn `ADinoTestCharacter`, which opens only that gate.
+
 The new screens (`UDinoSessionMenu`, `UDinoSpectatorOverlay`) are laid out in C++ with
 `WidgetTree->ConstructWidget` — no Blueprint to keep in step. Spectator controls are input
 actions created at runtime in `ADinoSpectatorPawn`, so no input assets either.

@@ -10,10 +10,12 @@
 #include "VoipListenerSynthComponent.h"
 #include "DinoGame.h"
 #include "DinoGameState.h"
+#include "DinoHealthRules.h"
 #include "DinoPlayerController.h"
 #include "DinoPlayerState.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/GameModeBase.h"
 #include "GameFramework/GameSession.h"
 #include "GameFramework/PlayerMuteList.h"
@@ -372,6 +374,28 @@ namespace
 					Add(Out, IsValid(Body) && Body->IsAlive(), FString::Printf(TEXT("Alive player has a body: %s"), *Who),
 						Body ? (Body->IsAlive() ? TEXT("possessing a living character") : TEXT("possessing a DEAD character"))
 							: TEXT("status Alive but possessing no character"));
+
+					// Status and body agree about being down: Downed status with a body on its feet, or
+					// Alive with a body that is down, means one side missed a transition.
+					if (IsValid(Body))
+					{
+						const bool bStatusDowned = Player->GetStatus() == EDinoPlayerStatus::Downed;
+						Add(Out, bStatusDowned == Body->IsDowned(), FString::Printf(TEXT("Down state matches: %s"), *Who),
+							FString::Printf(TEXT("status %s, body %s%s"), StatusName(Player),
+								Body->IsDowned() ? TEXT("down") : TEXT("standing"),
+								Body->IsDowned() ? *FString::Printf(TEXT(", %.0f%% bleed-out left"), Body->GetBleedOut()) : TEXT("")));
+
+						// Down means on the ground and going nowhere, pinned or not. A pin ending while
+						// down used to stand the body up and hand movement back.
+						if (Body->IsDowned())
+						{
+							const UCharacterMovementComponent* Movement = Body->GetCharacterMovement();
+							const bool bStill = Movement && Movement->MovementMode == MOVE_None;
+							Add(Out, bStill && Body->IsLyingDown(), FString::Printf(TEXT("Downed lies still: %s"), *Who),
+								FString::Printf(TEXT("%s, movement %s%s"), Body->IsLyingDown() ? TEXT("lying") : TEXT("STANDING"),
+									bStill ? TEXT("off") : TEXT("ON"), Body->IsRestrained() ? TEXT(", pinned") : TEXT("")));
+						}
+					}
 				}
 				else
 				{
@@ -382,6 +406,27 @@ namespace
 						FString::Printf(TEXT("status %s, controller %s"), StatusName(Player),
 							bSpectating ? TEXT("spectating") : TEXT("NOT spectating (fine only within a few seconds of dying)")));
 				}
+			}
+		}
+
+		// Nobody is ever left down with nobody standing to revive them (ADinoGameMode::
+		// BleedOutEveryoneIfNoOneStanding) - the round would otherwise wait out their bleed-out.
+		if (bRound)
+		{
+			int32 Standing = 0;
+			int32 Downed = 0;
+			for (const APlayerState* State : GameState.PlayerArray)
+			{
+				if (const ADinoPlayerState* Player = Cast<ADinoPlayerState>(State))
+				{
+					Standing += Player->GetStatus() == EDinoPlayerStatus::Alive ? 1 : 0;
+					Downed += Player->GetStatus() == EDinoPlayerStatus::Downed ? 1 : 0;
+				}
+			}
+			if (Downed > 0)
+			{
+				Add(Out, !DinoHealthRules::ShouldBleedOutEveryone(Standing, Downed), TEXT("Someone left to revive the downed"),
+					FString::Printf(TEXT("%d standing, %d down"), Standing, Downed));
 			}
 		}
 

@@ -19,6 +19,43 @@ class USoundAttenuation;
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FDinoHealthChanged, float, NewHealth, float, Delta);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FDinoDied);
 
+class ADinoCharacter;
+
+/**
+ * Health, downed, and the bleed-out meter, replicated as one property on purpose - the same
+ * reasoning as FDinoPlayerStatusState. As separate properties a client could see health reach
+ * zero a frame before "downed" arrived, and play a death that never happened.
+ * The rules that change it are DinoHealthRules.
+ */
+USTRUCT(BlueprintType)
+struct FDinoVitalsState
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "Dino|Health")
+	float Health = 100.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Dino|Health")
+	bool bDowned = false;
+
+	/** 0 - 100 while downed. At 0 they are dead. */
+	UPROPERTY(BlueprintReadOnly, Category = "Dino|Health")
+	float BleedOut = 0.0f;
+};
+
+/** A revive in progress on this (downed) player: who, and how far along. For both players' screens. */
+USTRUCT(BlueprintType)
+struct FDinoReviveState
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "Dino|Health")
+	float Progress = 0.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Dino|Health")
+	TObjectPtr<ADinoCharacter> Reviver = nullptr;
+};
+
 /**
  * Networked base for player characters. Intentionally declares no mesh or camera components:
  * BP_FirstPersonCharacter already owns those, so reparenting onto this class is non-destructive.
@@ -73,17 +110,50 @@ public:
 	void Die(TSubclassOf<UDamageType> Cause);
 
 	UFUNCTION(BlueprintPure, Category = "Dino|Health")
-	float GetCurrentHealth() const { return CurrentHealth; }
+	float GetCurrentHealth() const { return Vitals.Health; }
 
 	UFUNCTION(BlueprintPure, Category = "Dino|Health")
 	float GetMaxHealth() const { return MaxHealth; }
 
+	/** Not dead: standing, or down and still able to be revived. */
 	UFUNCTION(BlueprintPure, Category = "Dino|Health")
-	bool IsAlive() const { return CurrentHealth > 0.0f; }
+	bool IsAlive() const { return Vitals.Health > 0.0f || Vitals.bDowned; }
 
-	/** Server only. Clamped to [0, MaxHealth]. */
+	/** Down: cannot move, bleeding out, waiting for a teammate. Still alive. */
+	UFUNCTION(BlueprintPure, Category = "Dino|Health")
+	bool IsDowned() const { return Vitals.bDowned; }
+
+	/** Alive and on their feet. */
+	UFUNCTION(BlueprintPure, Category = "Dino|Health")
+	bool IsStanding() const { return Vitals.Health > 0.0f && !Vitals.bDowned; }
+
+	/** 0 - 100 while downed. */
+	UFUNCTION(BlueprintPure, Category = "Dino|Health")
+	float GetBleedOut() const { return Vitals.BleedOut; }
+
+	const FDinoReviveState& GetReviveState() const { return ReviveState; }
+
+	/** Server only. Clamped to [0, MaxHealth]. Only while standing. */
 	UFUNCTION(BlueprintCallable, Category = "Dino|Health")
 	void Heal(float Amount);
+
+	/** Server only. Stands a downed player back up with HealthFraction of max health. Called by ADinoGameMode::RevivePlayer. */
+	void Revive(float HealthFraction);
+
+	/**
+	 * The downed teammate this player would revive right now: down, not held by a creature,
+	 * within dino.Downed.ReviveRange and roughly in front of them. Null when there is none. Any
+	 * machine - for the revive key and the on-screen prompt.
+	 */
+	ADinoCharacter* FindReviveTarget() const;
+
+	/** Revive key held: start reviving Target. The server checks everything again, every tick. */
+	UFUNCTION(Server, Reliable)
+	void ServerBeginRevive(ADinoCharacter* Target);
+
+	/** Revive key released. */
+	UFUNCTION(Server, Reliable)
+	void ServerStopRevive();
 
 	/** Fires on every machine, including the server. */
 	UPROPERTY(BlueprintAssignable, Category = "Dino|Health")
@@ -131,6 +201,9 @@ public:
 	/** The creature holding this player, or null. What a future jaw camera would attach to. */
 	UFUNCTION(BlueprintPure, Category = "Dino|Restraint")
 	ADinoCreature* GetRestrainingCreature() const { return Restraint.Captor; }
+
+	/** Lying on the ground: pinned, or down. For the self-check and tests. */
+	bool IsLyingDown() const { return bPinnedPoseApplied; }
 
 	/** Flat direction from this player to their captor when caught. The pinned body's feet point this way. */
 	FVector GetPinDirection() const { return Restraint.Direction; }
@@ -275,14 +348,56 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Dino|Crouch", meta = (ClampMin = "0.5"))
 	float CrouchViewSpeed = 10.0f;
 
-	UPROPERTY(ReplicatedUsing = OnRep_CurrentHealth, BlueprintReadOnly, Category = "Dino|Health")
-	float CurrentHealth = 100.0f;
+	UPROPERTY(ReplicatedUsing = OnRep_Vitals, BlueprintReadOnly, Category = "Dino|Health")
+	FDinoVitalsState Vitals;
+
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Dino|Health")
+	FDinoReviveState ReviveState;
 
 	UFUNCTION()
-	void OnRep_CurrentHealth(float OldHealth);
+	void OnRep_Vitals(const FDinoVitalsState& OldVitals);
 
 private:
-	void ApplyHealthChange(float OldHealth);
+	/**
+	 * Everything that follows a change in health or state, on every machine: from each change on
+	 * the server, and from the RepNotify elsewhere. Going down, being revived and dying each run
+	 * from here, decided by comparing before and after, so the same transitions happen everywhere.
+	 */
+	void ApplyVitalsChange(const FDinoVitalsState& OldVitals);
+
+	/** Every machine. Stops movement, lays the body down as a pin does, starts bleeding out on the server. */
+	void HandleDowned();
+
+	/** Every machine. Back on their feet, out of the lying pose. */
+	void HandleRevived();
+
+	/** Server, while downed: the bleed-out meter drains (DinoHealthRules::Bleed). */
+	void BleedTick();
+	FTimerHandle BleedTimer;
+
+	/** The last quarter of bleed-out logged, so the log marks 75 / 50 / 25 % left, not every tick. */
+	int32 LastBleedQuarterLogged = 4;
+	void LogBleedOut();
+
+	/** Server: the damage type that downed this player, for the log and the game mode. */
+	TSubclassOf<UDamageType> PendingDownCause;
+
+	// --- Reviving someone else ------------------------------------------------------------------
+
+	/** Server, while this player revives someone: checks it can go on, and advances it. */
+	void ReviveTick();
+	void StopReviving(const TCHAR* Reason);
+	FTimerHandle ReviveTimer;
+	TWeakObjectPtr<ADinoCharacter> ReviveTarget;
+
+	void HandleRevivePressed();
+	void HandleReviveReleased();
+
+	UPROPERTY(Transient)
+	TObjectPtr<UInputAction> ReviveAction;
+
+	/** The lowered view: eases toward ViewHeight above the floor. Crouching uses it; down uses the pinned pose. */
+	void BeginLoweredView(float ViewHeight);
 
 	/**
 	 * Server only. The damage type of the hit that is killing this character, recorded before
@@ -300,7 +415,10 @@ private:
 	/** Applies or undoes restraint effects. Runs on every machine, like ApplyHealthChange. */
 	void ApplyRestraintChange(const FDinoRestraintState& OldRestraint);
 
-	/** Lays the body down feet-first toward the captor. Every machine; the view part only locally. */
+	/**
+	 * Lays the body down feet-first toward the captor. Every machine; the view part only locally.
+	 * Pinned and downed players both lie in it; it stays while either holds.
+	 */
 	void ApplyPinnedPose();
 
 	/** Stands the body back up and restores the view. Safe to call when not posed. */
@@ -313,6 +431,9 @@ private:
 	UPrimitiveComponent* FindFirstPersonMesh() const;
 
 	bool bPinnedPoseApplied = false;
+
+	/** The way the lying body's feet point, kept so a pin ending while down leaves the body where it lies. */
+	FVector PoseDirection = FVector::ZeroVector;
 
 	// --- Crouch view ---------------------------------------------------------------------------
 	// The camera rides the first-person arms, and on a crouch the engine keeps those where they

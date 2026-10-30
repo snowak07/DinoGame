@@ -86,7 +86,7 @@ bool UDinoFlareGunComponent::CanFire() const
 {
 	const ADinoCharacter* Shooter = Cast<ADinoCharacter>(GetOwner());
 	return Shooter
-		&& Shooter->IsAlive()
+		&& Shooter->IsStanding()
 		&& !Shooter->IsRestrained()
 		&& GetCooldownRemaining() <= 0.0f;
 }

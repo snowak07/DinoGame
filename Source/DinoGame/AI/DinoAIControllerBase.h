@@ -571,6 +571,14 @@ private:
 	/** "Ignored, already hunting" is logged at most this often, or a talking target would flood the log. */
 	double LastIgnoredLogTime = -1.0e9;
 
+	/**
+	 * The victim a flare shot this creature off, and until when it leaves them alone
+	 * (dino.AI.FlaredVictimIgnoreSeconds) - long enough for a teammate to revive them. Without it
+	 * the raptor came straight back to finish them as soon as the shooter was out of sight.
+	 */
+	TWeakObjectPtr<AActor> FlaredOffVictim;
+	double FlaredOffVictimUntil = -1.0e9;
+
 	/** A forced investigation (flare hit) received mid-attack, carried out when the attack ends. */
 	bool bHasPendingForcedInvestigation = false;
 	FVector PendingInvestigationLocation = FVector::ZeroVector;
