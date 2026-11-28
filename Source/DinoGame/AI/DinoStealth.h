@@ -20,4 +20,10 @@ namespace DinoStealth
 
 	/** How far (cm) landing from a jump or a fall carries. */
 	float LandingRange();
+
+	/** How long (s) a searching creature stops at a bush to check it before finding whoever is inside. */
+	float BushCheckSeconds();
+
+	/** Bodies this close (cm, capsule edge to edge) are touching: a creature finds a player it bumps into. */
+	float TouchDistance();
 }

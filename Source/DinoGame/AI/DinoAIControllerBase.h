@@ -6,6 +6,7 @@
 #include "DinoCombatTypes.h"
 #include "DinoAIControllerBase.generated.h"
 
+class ADinoBush;
 class ADinoCharacter;
 class UAIPerceptionComponent;
 class UDinoAttackComponent;
@@ -154,6 +155,53 @@ public:
 	 * retried that same spot thousands of times instead of coming as close as it could.
 	 */
 	bool ResolveReachablePoint(const FVector& Wanted, FVector& OutPoint) const;
+
+	// --- Bushes ---------------------------------------------------------------------------------
+	// A bush (ADinoBush) hides a player from sight and the close sense. This creature finds them
+	// anyway by bumping into them, walking into their bush, or checking it as a search step
+	// (DinoTargetRules::FindsHiddenPlayer). Found, the bush stops hiding them from this creature.
+
+	/**
+	 * The bush this creature found Player in, while they are still in it - that bush no longer
+	 * hides them from it (ADinoCharacter::CanBeSeenFrom). Null otherwise.
+	 */
+	const ADinoBush* GetBushRevealedIn(const AActor* Player) const;
+
+	/** Found Player in Bush: the bush stops hiding them from this creature, and it turns to look. */
+	void RevealPlayer(ADinoCharacter* Player, ADinoBush* Bush, const TCHAR* How);
+
+	/**
+	 * Makes a trace from this creature to Player pass through the bush it found them in. Every
+	 * trace that decides what it can see or reach goes through here: the attacks' line check
+	 * once missed it, and a raptor that had found a player stood next to them, never pouncing.
+	 */
+	void IgnoreBushFoundIn(FCollisionQueryParams& Params, const AActor* Player) const;
+
+	/** Nothing blocks Visibility between From and Player, but Player and the bush this creature found them in. */
+	bool HasClearLineTo(const FVector& From, const AActor* Player) const;
+
+	/** The bush this creature is walking to check or checking now, for debug draw. */
+	const ADinoBush* GetBushBeingChecked() const { return BushToCheck.Get(); }
+	bool IsCheckingBush() const { return bCheckingBush; }
+
+	/**
+	 * Search step, before a leg: when DinoTargetRules::ShouldCheckBushNext says so, the leg goes
+	 * to the edge of a bush instead - replacing InOutDestination - and the next step checks it.
+	 */
+	void ChooseBushToCheck(FVector& InOutDestination);
+
+	/**
+	 * Search step, at its start: true when the last leg walked to a bush and is close enough to
+	 * check it. The check then runs instead of a leg. False otherwise, including when the walk
+	 * ended out of reach (the bush is skipped).
+	 */
+	bool BeginBushCheckIfArrived();
+
+	/** Search step, each tick of a check: true while it goes on, false once it has finished. */
+	bool TickBushCheck();
+
+	/** Stops a check in progress - the search step was left for something else. */
+	void CancelBushCheck(const TCHAR* Reason);
 
 	/** The candidate chosen for the *next* leg. Seeded to LastKnownLocation on contact loss. */
 	UFUNCTION(BlueprintPure, Category = "Dino|AI")
@@ -554,6 +602,31 @@ private:
 	/** Close-range sense, from the combat tick. See CloseSenseRadius. */
 	void CheckCloseSense();
 	double LastCloseSenseTime = -1.0e9;
+
+	/** From the combat tick: finds players hiding in a bush it bumped into them in, or walked into. */
+	void CheckHiddenPlayers();
+
+	/** The check's time is up: everyone still inside is found. */
+	void FinishBushCheck();
+
+	/** A new search: no bush checked yet. */
+	void ResetBushChecks();
+
+	bool HasCheckedBush(const ADinoBush* Bush) const;
+
+	/** Players this creature found in a bush, and which bush. Holds only while they stay in it. */
+	TMap<TWeakObjectPtr<const AActor>, TWeakObjectPtr<ADinoBush>> RevealedIn;
+
+	/** Bushes checked this search, so it moves on to others. */
+	TArray<TWeakObjectPtr<ADinoBush>> CheckedBushes;
+
+	TWeakObjectPtr<ADinoBush> BushToCheck;
+	bool bWalkingToBush = false;
+	bool bCheckingBush = false;
+	double BushCheckEndTime = 0.0;
+
+	/** The last leg was a bush check, so the next one covers open ground. */
+	bool bLastLegCheckedBush = false;
 
 	double LastVoiceReactionTime = -1.0e9;
 

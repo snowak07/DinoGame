@@ -10,6 +10,7 @@
 #include "Components/CapsuleComponent.h"
 #include "DinoCharacter.h"
 #include "DinoGame.h"
+#include "World/DinoBush.h"
 #include "Perception/AISense_Sight.h"
 #include "DrawDebugHelpers.h"
 #include "EngineUtils.h"
@@ -427,6 +428,7 @@ void ADinoAIControllerBase::ForgetTarget()
 
 	ClearFocus(EAIFocusPriority::Gameplay);
 	CurrentTarget = nullptr;
+	ResetBushChecks();
 	SetAwareness(EDinoAwareness::Unaware);
 	BP_OnTargetForgotten();
 }
@@ -500,6 +502,7 @@ void ADinoAIControllerBase::ApplyAwareness(EDinoAwareness NewAwareness)
 	if (NewAwareness == EDinoAwareness::Searching && Creature->GetAwareness() != EDinoAwareness::Searching)
 	{
 		LegsThisSearch = 0;
+		ResetBushChecks();
 	}
 
 	Creature->SetAwareness(NewAwareness);
@@ -590,6 +593,7 @@ void ADinoAIControllerBase::TickCombat()
 	AcquireVisibleWhileNotHunting();
 	ReconsiderTarget();
 	CheckCloseSense();
+	CheckHiddenPlayers();
 
 	if (!AttackComponent)
 	{
@@ -737,6 +741,37 @@ bool ADinoAIControllerBase::Investigate(const FVector& Location, AActor* Source,
 		return false;
 	}
 
+	// A noise from the bush it is checking, or walking to check, is where it is already looking:
+	// it carries on. Redirected, a player talking in their bush cancelled the check that would
+	// have found them.
+	ADinoBush* BusyWith = BushToCheck.Get();
+	const bool bFromThatBush = BusyWith
+		&& (BusyWith->CoversFlat(Location) || (Source && BusyWith->Contains(Source->GetActorLocation())));
+	if (DinoTargetRules::NoiseKeepsBushCheck(BusyWith && (bCheckingBush || bWalkingToBush), bForce, bFromThatBush))
+	{
+		if (CurrentTarget != Source)
+		{
+			LastTargetChangeTime = World->GetTimeSeconds();
+		}
+		CurrentTarget = Source;
+		LastKnownLocation = Location;
+		GetWorldTimerManager().SetTimer(MemoryTimer, this, &ADinoAIControllerBase::ForgetTarget, MemoryDuration, false);
+		UE_LOG(LogDinoGame, Log, TEXT("%s keeps %s %s: %s (%s) came from it."), *GetName(),
+			bCheckingBush ? TEXT("checking") : TEXT("going to check"), *BusyWith->GetName(), Reason, *GetNameSafe(Source));
+		return true;
+	}
+
+	// A noise from a bush it already checked and found empty: someone may have crept in since.
+	if (ADinoBush* NoiseBush = ADinoBush::FindCovering(World, Location))
+	{
+		if (DinoTargetRules::NoiseReopensBush(HasCheckedBush(NoiseBush), GetBushRevealedIn(Source) == NoiseBush))
+		{
+			CheckedBushes.RemoveAll([NoiseBush](const TWeakObjectPtr<ADinoBush>& Checked) { return Checked.Get() == NoiseBush; });
+			UE_LOG(LogDinoGame, Log, TEXT("%s heard %s from %s, which it had checked: worth another look."), *GetName(),
+				Reason, *NoiseBush->GetName());
+		}
+	}
+
 	if (CurrentTarget != Source)
 	{
 		LastTargetChangeTime = GetWorld()->GetTimeSeconds();
@@ -754,6 +789,7 @@ bool ADinoAIControllerBase::Investigate(const FVector& Location, AActor* Source,
 	bInvestigatePointPending = true;
 
 	GetWorldTimerManager().ClearTimer(LostSightTimer);
+	CancelBushCheck(TEXT("investigating something else"));
 	ClearFocus(EAIFocusPriority::Gameplay);
 
 	const bool bWasSearching = Awareness == EDinoAwareness::Searching;
@@ -828,6 +864,327 @@ void ADinoAIControllerBase::CheckCloseSense()
 			return;
 		}
 	}
+}
+
+// --- Bushes ------------------------------------------------------------------------------------
+
+void ADinoAIControllerBase::CheckHiddenPlayers()
+{
+	const ACharacter* Self = Cast<ACharacter>(GetPawn());
+	UWorld* World = GetWorld();
+	if (!Self || !World || IsEngagedInAttack())
+	{
+		return;
+	}
+
+	const UCapsuleComponent* SelfCapsule = Self->GetCapsuleComponent();
+	const float SelfRadius = SelfCapsule ? SelfCapsule->GetScaledCapsuleRadius() : 0.0f;
+	const float SelfHalfHeight = SelfCapsule ? SelfCapsule->GetScaledCapsuleHalfHeight() : 0.0f;
+	const ADinoBush* MyBush = ADinoBush::FindContaining(World, Self->GetActorLocation());
+
+	for (TActorIterator<ADinoCharacter> It(World); It; ++It)
+	{
+		ADinoCharacter* Player = *It;
+		if (!IsValidTarget(Player))
+		{
+			continue;
+		}
+
+		ADinoBush* TheirBush = ADinoBush::FindContaining(World, Player->GetActorLocation());
+
+		// Out of the bush it was found in: hidden again by the next one, or in the open where
+		// sight sees to them.
+		if (const TWeakObjectPtr<ADinoBush>* Revealed = RevealedIn.Find(Player))
+		{
+			if (Revealed->Get() != TheirBush)
+			{
+				UE_LOG(LogDinoGame, Log, TEXT("%s: %s left the bush it found them in (%s)."), *GetName(), *Player->GetName(),
+					TheirBush ? TEXT("now in another one") : TEXT("now in the open"));
+				RevealedIn.Remove(Player);
+			}
+		}
+
+		// In the open, sight and the close sense are the whole story.
+		if (!TheirBush || GetBushRevealedIn(Player) == TheirBush)
+		{
+			continue;
+		}
+
+		const UCapsuleComponent* Capsule = Player->GetCapsuleComponent();
+		const float Radius = Capsule ? Capsule->GetScaledCapsuleRadius() : 0.0f;
+		const float HalfHeight = Capsule ? Capsule->GetScaledCapsuleHalfHeight() : 0.0f;
+		const float EdgeDistance = FVector::Dist2D(Self->GetActorLocation(), Player->GetActorLocation()) - SelfRadius - Radius;
+		const bool bLevel = FMath::Abs(Self->GetActorLocation().Z - Player->GetActorLocation().Z) <= SelfHalfHeight + HalfHeight;
+		const bool bTouching = bLevel && DinoTargetRules::IsTouching(EdgeDistance, DinoStealth::TouchDistance());
+		const bool bSameBush = MyBush == TheirBush;
+
+		if (DinoTargetRules::FindsHiddenPlayer(bTouching, bSameBush, false))
+		{
+			RevealPlayer(Player, TheirBush, bSameBush ? TEXT("walked into the bush they hide in") : TEXT("bumped into them"));
+		}
+	}
+}
+
+void ADinoAIControllerBase::RevealPlayer(ADinoCharacter* Player, ADinoBush* Bush, const TCHAR* How)
+{
+	if (!Player || !Bush)
+	{
+		return;
+	}
+
+	RevealedIn.Add(Player, Bush);
+
+	const EDinoAwareness Awareness = GetAwareness();
+	UE_LOG(LogDinoGame, Log, TEXT("%s found %s hiding in %s: %s (%s)."), *GetName(), *Player->GetName(), *Bush->GetName(), How,
+		*DinoAwarenessName(Awareness));
+
+	// Hunting, sight decides: the bush no longer hides them, so ReconsiderTarget weighs them like
+	// anyone else in view. Otherwise go to them, and turn to look - sight is a narrow cone, and
+	// it is what turns this into a hunt (AcquireVisibleWhileNotHunting).
+	if (Awareness != EDinoAwareness::Hunting)
+	{
+		Investigate(Player->GetActorLocation(), Player, TEXT("a player found in a bush"));
+		SetFocus(Player);
+	}
+
+	// Already found there; nothing left to check. After Investigate, which may start a new
+	// search and clear the list.
+	if (!HasCheckedBush(Bush))
+	{
+		CheckedBushes.Add(Bush);
+	}
+}
+
+const ADinoBush* ADinoAIControllerBase::GetBushRevealedIn(const AActor* Player) const
+{
+	const TWeakObjectPtr<ADinoBush>* Revealed = Player ? RevealedIn.Find(Player) : nullptr;
+	const ADinoBush* Bush = Revealed ? Revealed->Get() : nullptr;
+	return Bush && Bush->Contains(Player->GetActorLocation()) ? Bush : nullptr;
+}
+
+void ADinoAIControllerBase::IgnoreBushFoundIn(FCollisionQueryParams& Params, const AActor* Player) const
+{
+	if (const ADinoBush* FoundIn = GetBushRevealedIn(Player))
+	{
+		Params.AddIgnoredActor(FoundIn);
+	}
+}
+
+bool ADinoAIControllerBase::HasClearLineTo(const FVector& From, const AActor* Player) const
+{
+	const UWorld* World = GetWorld();
+	if (!World || !Player)
+	{
+		return false;
+	}
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(DinoClearLine), false, GetPawn());
+	Params.AddIgnoredActor(Player);
+	IgnoreBushFoundIn(Params, Player);
+	return !World->LineTraceTestByChannel(From, Player->GetActorLocation(), ECC_Visibility, Params);
+}
+
+bool ADinoAIControllerBase::HasCheckedBush(const ADinoBush* Bush) const
+{
+	return CheckedBushes.ContainsByPredicate([Bush](const TWeakObjectPtr<ADinoBush>& Checked) { return Checked.Get() == Bush; });
+}
+
+void ADinoAIControllerBase::ResetBushChecks()
+{
+	if (bCheckingBush || bWalkingToBush)
+	{
+		CancelBushCheck(TEXT("a new search"));
+	}
+	CheckedBushes.Reset();
+	bLastLegCheckedBush = false;
+}
+
+void ADinoAIControllerBase::ChooseBushToCheck(FVector& InOutDestination)
+{
+	const ACharacter* Self = Cast<ACharacter>(GetPawn());
+	const UWorld* World = GetWorld();
+	if (!Self || !World)
+	{
+		return;
+	}
+
+	ADinoBush* InDestination = ADinoBush::FindCovering(World, InOutDestination);
+	if (InDestination && HasCheckedBush(InDestination))
+	{
+		InDestination = nullptr;
+	}
+
+	// The nearest unchecked bush within the search area, measured from where it is searching.
+	ADinoBush* Nearest = nullptr;
+	float NearestDistance = TNumericLimits<float>::Max();
+	const FVector SearchCentre = IsUsableWorldLocation(LastKnownLocation) ? LastKnownLocation : Self->GetActorLocation();
+	for (TActorIterator<ADinoBush> It(const_cast<UWorld*>(World)); It; ++It)
+	{
+		ADinoBush* Bush = *It;
+		if (HasCheckedBush(Bush) || FVector::Dist2D(Bush->GetCentre(), SearchCentre) > CurrentSearchRadius())
+		{
+			continue;
+		}
+		const float Distance = FVector::Dist2D(Bush->GetCentre(), Self->GetActorLocation());
+		if (Distance < NearestDistance)
+		{
+			NearestDistance = Distance;
+			Nearest = Bush;
+		}
+	}
+
+	if (!DinoTargetRules::ShouldCheckBushNext(InDestination != nullptr, bInvestigatePointPending, Nearest != nullptr, bLastLegCheckedBush))
+	{
+		bLastLegCheckedBush = false;
+		return;
+	}
+
+	ADinoBush* Bush = InDestination ? InDestination : Nearest;
+	const float SelfRadius = Self->GetCapsuleComponent() ? Self->GetCapsuleComponent()->GetScaledCapsuleRadius() : 0.0f;
+	BushToCheck = Bush;
+	bWalkingToBush = true;
+	InOutDestination = Bush->GetCheckSpot(Self->GetActorLocation(), SelfRadius);
+	NextPointSource = TEXT("bush");
+
+	UE_LOG(LogDinoGame, Log, TEXT("%s will check %s (%.1f m across, %.1f m away): %s."), *GetName(), *Bush->GetName(),
+		Bush->GetRadius() * 2.0f / 100.0f, FVector::Dist2D(Bush->GetCentre(), Self->GetActorLocation()) / 100.0f,
+		InDestination ? TEXT("the spot it was going to search is in it") : TEXT("the nearest unchecked bush in the search area"));
+}
+
+bool ADinoAIControllerBase::BeginBushCheckIfArrived()
+{
+	if (!bWalkingToBush)
+	{
+		return false;
+	}
+	bWalkingToBush = false;
+
+	const ACharacter* Self = Cast<ACharacter>(GetPawn());
+	ADinoBush* Bush = BushToCheck.Get();
+	UWorld* World = GetWorld();
+	if (!Self || !Bush || !World)
+	{
+		BushToCheck.Reset();
+		return false;
+	}
+
+	// Close enough to reach in: the check spot, give or take where the path ended.
+	const float SelfRadius = Self->GetCapsuleComponent() ? Self->GetCapsuleComponent()->GetScaledCapsuleRadius() : 0.0f;
+	const float Reach = Bush->GetRadius() + SelfRadius + 150.0f;
+	const float Distance = FVector::Dist2D(Self->GetActorLocation(), Bush->GetCentre());
+	if (Distance > Reach)
+	{
+		if (DinoTargetRules::CountsAsChecked(false, true))
+		{
+			CheckedBushes.Add(Bush);
+		}
+		UE_LOG(LogDinoGame, Log, TEXT("%s could not get to %s (stopped %.1f m from its middle, needs %.1f m); moving on."),
+			*GetName(), *Bush->GetName(), Distance / 100.0f, Reach / 100.0f);
+		BushToCheck.Reset();
+		bLastLegCheckedBush = true;
+		return false;
+	}
+
+	bCheckingBush = true;
+	BushCheckEndTime = World->GetTimeSeconds() + DinoStealth::BushCheckSeconds();
+
+	// No leg is running, so its watchdog has nothing to abandon.
+	GetWorldTimerManager().ClearTimer(SearchLegTimer);
+	StopMovement();
+	SetFocalPoint(Bush->GetCentre());
+
+	TArray<FString> Inside;
+	for (TActorIterator<ADinoCharacter> It(World); It; ++It)
+	{
+		if (IsValidTarget(*It) && Bush->Contains(It->GetActorLocation()))
+		{
+			Inside.Add(It->GetName());
+		}
+	}
+	UE_LOG(LogDinoGame, Log, TEXT("%s checking %s for %.1f s (inside now: %s)."), *GetName(), *Bush->GetName(),
+		DinoStealth::BushCheckSeconds(), Inside.IsEmpty() ? TEXT("nobody") : *FString::Join(Inside, TEXT(", ")));
+
+	// TODO(sound): the sniff sound plays here once creature sound slots exist.
+	return true;
+}
+
+bool ADinoAIControllerBase::TickBushCheck()
+{
+	if (!bCheckingBush)
+	{
+		return false;
+	}
+
+	const UWorld* World = GetWorld();
+	if (World && World->GetTimeSeconds() < BushCheckEndTime)
+	{
+		return true;
+	}
+
+	FinishBushCheck();
+	return false;
+}
+
+void ADinoAIControllerBase::FinishBushCheck()
+{
+	bCheckingBush = false;
+	bLastLegCheckedBush = true;
+	ClearFocus(EAIFocusPriority::Gameplay);
+
+	ADinoBush* Bush = BushToCheck.Get();
+	BushToCheck.Reset();
+	UWorld* World = GetWorld();
+	if (!Bush || !World)
+	{
+		return;
+	}
+
+	// Counted only now, at the end. Counted at the start, a check cut short by a noise left the
+	// bush "checked" with whoever was in it never found, and every later noise from it ignored.
+	if (DinoTargetRules::CountsAsChecked(true, false) && !HasCheckedBush(Bush))
+	{
+		CheckedBushes.Add(Bush);
+	}
+
+	// Gathered first: revealing starts an investigation, which must not change who counts.
+	TArray<ADinoCharacter*> Found;
+	for (TActorIterator<ADinoCharacter> It(World); It; ++It)
+	{
+		if (IsValidTarget(*It) && Bush->Contains(It->GetActorLocation())
+			&& DinoTargetRules::FindsHiddenPlayer(false, false, true))
+		{
+			Found.Add(*It);
+		}
+	}
+
+	if (Found.IsEmpty())
+	{
+		UE_LOG(LogDinoGame, Log, TEXT("%s checked %s: nobody inside."), *GetName(), *Bush->GetName());
+		return;
+	}
+	for (ADinoCharacter* Player : Found)
+	{
+		RevealPlayer(Player, Bush, TEXT("checked the bush"));
+	}
+}
+
+void ADinoAIControllerBase::CancelBushCheck(const TCHAR* Reason)
+{
+	if (!bCheckingBush && !bWalkingToBush)
+	{
+		return;
+	}
+
+	UE_LOG(LogDinoGame, Log, TEXT("%s stopped %s %s: %s."), *GetName(), bCheckingBush ? TEXT("checking") : TEXT("going to check"),
+		*GetNameSafe(BushToCheck.Get()), Reason);
+
+	if (bCheckingBush)
+	{
+		ClearFocus(EAIFocusPriority::Gameplay);
+	}
+	bCheckingBush = false;
+	bWalkingToBush = false;
+	BushToCheck.Reset();
 }
 
 AActor* ADinoAIControllerBase::FindNearestVisibleTarget(const AActor* Exclude, float* OutDistance) const
@@ -1139,6 +1496,7 @@ FString ADinoAIControllerBase::ExplainSight(const AActor* Target) const
 	}
 
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(DinoVisionTest), true, Self);
+	IgnoreBushFoundIn(Params, Target);
 	FHitResult Hit;
 	if (World->LineTraceSingleByChannel(Hit, Eyes, TargetLocation, ECC_Visibility, Params)
 		&& Hit.GetActor() != Target && !(Hit.GetActor() && Hit.GetActor()->IsOwnedBy(Target)))

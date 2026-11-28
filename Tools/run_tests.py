@@ -7,8 +7,9 @@ itself known to work.
     python Tools/run_tests.py --no-build   run against the current editor build
     python Tools/run_tests.py DinoGame.Voice   run one group (any test-name prefix)
 
-Needs the editor closed: Live Coding locks the editor target's DLL, so the build fails while
-it is open. Exit code 0 when every test passed.
+The editor can stay open unless its C++ is out of date: Live Coding holds the editor target's
+DLL, and the build tool refuses to build only when something there needs compiling. Then the
+build fails and says to close the editor. Exit code 0 when every test passed.
 
 The tests are in Source/DinoGameTests (an editor-only module, never packaged). The same tests
 appear in the editor under Tools -> Session Frontend -> Automation, as "DinoGame".
@@ -46,6 +47,9 @@ def build():
     errors = [line for line in output.splitlines() if " error " in line or ": error" in line or "Result: Failed" in line]
     if result.returncode != 0:
         print("\n".join(errors[-25:]) or output[-3000:])
+        if "Live Coding is active" in output:
+            print("The editor's C++ is out of date and the open editor blocks rebuilding it.")
+            print("Close the editor, run this again, and reopen the editor afterwards.")
         print("BUILD FAILED")
         return False
     print("Build succeeded.")
@@ -111,9 +115,8 @@ def main():
     parser.add_argument("--no-build", action="store_true", help="skip building the editor target")
     args = parser.parse_args()
 
-    if editor_running() and not args.no_build:
-        print("The editor is open. Close it first: Live Coding blocks the editor build.")
-        return 1
+    if editor_running():
+        print("The editor is open: fine, unless its C++ needs rebuilding (the build will say so).")
 
     print("Log checker self-test...")
     checker = subprocess.run([sys.executable, str(Path(__file__).parent / "check_logs.py"), "--self-test"], capture_output=True, text=True)

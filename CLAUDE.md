@@ -56,6 +56,12 @@ inherits from — a new `UPROPERTY`, a new component — requires it.
 open. What actually blocks a game-target build is a running packaged `DinoGame.exe` holding
 `Binaries/Win64/DinoGame.exe` open. Check for `DinoGame` processes, not the editor.
 
+**And it blocks the editor target only when something needs compiling** (UBT's
+`CheckForLiveCodingSessionActive` runs only for outdated actions). So `package.bat` and
+`run_tests.py` run with the editor open once the editor has been restarted on the current C++;
+after a C++ change they stop with "close the editor". Unsaved editor changes are not packaged.
+This holds only because the version stamp stays out of the editor target (below).
+
 **A map reached only by travel is not packaged unless it is listed.** The cooker includes the
 default map and what it references; a map you `ServerTravel` to by path is referenced by
 nothing. List every playable map under `MapsToCook` in `Config/DefaultGame.ini`. Missing, the
@@ -74,7 +80,9 @@ config, and fails silently.
 | Blueprint or asset edits | Full package |
 
 Builds are stamped with the git short SHA (`-dirty` when the tree is uncommitted) via
-`Build/DinoBuildVersion.txt`, compiled in as `DINO_BUILD_VERSION`. The version shows on screen in
+`Build/DinoBuildVersion.txt`, compiled in as `DINO_BUILD_VERSION` — game targets only. The define
+is module-wide, so stamping the editor target made every commit recompile the editor DLL, which
+cannot happen with the editor open; the editor shows `unknown`. The version shows on screen in
 game and in `DinoNetStatus`. When two players disagree about behaviour, different builds is the
 first thing to rule out.
 
@@ -302,6 +310,54 @@ mostly find players through what they hear and feel. Every one of those routes e
 - **`Suspicious` has no StateTree state** (`ST_TRex` has Idle, Hunting, Searching, Attacking), so
   nothing should set it. Noises go to Searching.
 
+### Bushes
+
+`ADinoBush` (`World/`) is the parent of `BP_Bush`; the Blueprint supplies only the leaves (static
+mesh components). The leaves use the `Foliage` collision preset (`Config/DefaultEngine.ini`):
+Visibility blocked, Pawn, Camera and Projectile ignored. They must not affect navigation.
+
+- **One channel hides you from everything.** Sight, the close sense and the noise system all
+  trace Visibility, so a bush blocks sight and the close sense and halves noise, as a wall does.
+- **Creatures go around, but chase through.** The ground under a bush is `UDinoNavArea_Foliage`
+  (cost 5), marked by a runtime `UDinoBushNavShape`, which is a dynamic-obstacle shape and so an
+  area rather than a hole. Wandering and searching pay that cost. The chase uses
+  `UDinoNavFilter_Chase`, where bushes cost 1, whatever the StateTree node's filter.
+  - The shape is added in `BeginPlay`, not as a default component: a native root would replace
+    `BP_Bush`'s own and move every placed bush.
+  - Because it is added at runtime, the editor's navmesh view (P) never shows the area.
+- **How a hidden player is found** (`DinoTargetRules::FindsHiddenPlayer`, always, never a chance):
+  - bumping into them (`CheckHiddenPlayers`);
+  - walking into their bush;
+  - checking it as a search step. `ChooseBushToCheck` sends the leg to the bush's edge, and the
+    next `FDinoSearchStepTask` runs the check instead of a leg (`BeginBushCheckIfArrived`).
+- **"In a bush" means the body's centre is inside the leaves' collision** (`ADinoBush::Contains`).
+  Grazing a bush is not being in it.
+- **Found means revealed, not hunted.** `RevealedIn` makes `ADinoCharacter::CanBeSeenFrom`
+  ignore that bush for that creature only, and the creature turns to look. Sight then starts the
+  hunt, so the hunt keeps its normal lost-sight handling: a hunt started without sight would never
+  receive a lost-sight event to end it. Leaving the bush ends the reveal.
+- **Every creature-to-player line check goes through `IgnoreBushFoundIn`**: sight, the attacks'
+  `HasClearLineTo`, the vision-test readout. The attack check once traced on its own, and a
+  raptor that had found a player stood beside them and never pounced. A new trace of that kind
+  uses it too.
+- **A bush check counts only when it finishes, and a noise from that bush does not interrupt it**
+  (`DinoTargetRules::NoiseKeepsBushCheck`, `CountsAsChecked`). A player talking in their bush once
+  cancelled the check that would have found them, and the bush stayed "checked", so later voices
+  from it were walked past. A noise from a bush checked empty earlier reopens it (`NoiseReopensBush`).
+- **The self-check `Navmesh under bushes` measures the navmesh**, not the leaves' settings: navmesh
+  all around a bush and none under its middle means the bush cut a hole, and creatures cannot walk
+  in. Searches stopping ~1.8 m from a player in a bush (bush radius plus raptor radius) is the sign.
+  It found exactly that: the navmesh saved with the map (last saved Oct 7) was built while the
+  leaves still cut it, and the foliage area only re-marks saved tiles (a modifier rebuild reuses the
+  saved layers), so it cannot fill a hole. **The fix is the data, not code: Build > Build Paths in
+  the editor, then Save All** (the navmesh is one external actor, not World Partitioned). Do it
+  after moving or adding bushes or other geometry; the self-check says so when it is needed.
+  A bush whose middle is within a creature's radius of something solid (a tree trunk: 60 cm for a
+  raptor, 140 for the T-Rex) has no navmesh there however it is set up. The check names what is in
+  the way and passes those; only an unexplained gap fails.
+- **The engine cannot be trusted with a trace that starts inside the same bush.** Being in the
+  same bush is decided explicitly instead.
+
 ---
 
 ## Voice chat
@@ -393,7 +449,7 @@ on a failure, so no playtest build ships with a known regression.
 
 | | What | Run |
 |---|---|---|
-| Unit tests | `Source/DinoGameTests` (editor-only module, never packaged): rules, voice registration, the host mute quirk, status, join codes | `python Tools/run_tests.py`: the checker's self-test, then the editor build, then the tests headless (~40 s). Needs the editor closed. Any error or ensure in the run fails it, even with every test passing |
+| Unit tests | `Source/DinoGameTests` (editor-only module, never packaged): rules, voice registration, the host mute quirk, status, join codes | `python Tools/run_tests.py`: the checker's self-test, then the editor build, then the tests headless (~40 s). The editor can stay open unless its C++ is out of date. Any error or ensure in the run fails it, even with every test passing |
 | Self-check | `DinoSelfCheck` (`Source/DinoGame/DinoSelfCheck.cpp`): live state on a real two-machine build against the rules. Voice registration, placement and the sound actually playing; mutes; views; and on the host also status, server mutes, creature targets and pins | Automatic after each phase change, death and join; or the console command |
 | Log checker | `Tools/check_logs.py`: crashes, ensures (with the game frame), self-check failures, unexplained disconnects, new warnings, build mismatch, crash-report folders, across both machines | `python Tools/check_logs.py [--backups N]`; `--self-test` checks the checker against `Tools/fixtures` |
 

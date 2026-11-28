@@ -78,7 +78,8 @@ Draws on the host whether or not debug draw is on.
 | `dino.Downed.ReviveRange 200` | How close (cm) a reviver has to stay. Host |
 | `dino.Downed.ReviveHealth 0.2` | Share of max health a revived player stands up with. Host |
 | `dino.AI.FlaredVictimIgnoreSeconds 10` | How long a raptor shot off its victim leaves that victim alone. Host |
-
+| `dino.Bush.CheckSeconds 1.5` | How long a searching creature stops at a bush to check it; whoever is still inside at the end is found. Host |
+| `dino.Bush.TouchDistance 15` | Bodies this close (cm, edge to edge) are touching: a creature finds a player in a bush it bumps into. Host |
 | `dino.Noise.Debug 1` | Draw how far voices carry (also on with `DinoAI.DebugDraw`). See below |
 
 The `dino.Noise.*` values are read live, so they can be tuned mid-session from the console.
@@ -114,6 +115,18 @@ session can be reviewed afterwards without the draw.
 
 "Comes to look" is Searching, not Hunting: it knows where to look, not where you are.
 
+**Hiding in a bush.** From outside, a bush hides you from sight and the 3 m sense, and your voice
+and footsteps carry half as far through it. Creatures walk around bushes rather than through them,
+except when chasing someone they can see. A creature finds you in a bush, every time, if it:
+
+- bumps into you,
+- walks into the bush you are in, or
+- **checks your bush.** A searching creature walks to the edge of a bush near where it is looking,
+  stops for 1.5 s, then finds whoever is still inside. A spot it was going to search that lies in a
+  bush is always checked this way. That pause is your chance to slip out - which makes noise.
+
+Once found, that bush stops hiding you from that creature until you leave it.
+
 While hunting, a creature goes after whoever it can see who is closest, and after switching sticks
 with the new target for 2 s. A sound never pulls it off the player it is chasing, and nothing
 does mid-attack. But if the player it is chasing is out of sight and talks, it hears where they are.
@@ -127,6 +140,8 @@ does mid-attack. But if the player it is chasing is out of sight and talks, it h
 | Cyan sphere + line | Where it sees from, and where it is looking |
 | Coloured sphere + line (searching) | Where it is walking to right now |
 | Small grey sphere (searching) | The next search point, already chosen |
+| Thin green ring (searching) | The bush it is walking to, to check |
+| Thick green ring + "checking bush" | The bush it is checking now |
 | Thick red line (hunting) | To the player it is chasing, while it can see them |
 | Red sphere + thin line (hunting) | Where it last saw them, while the hunt holds on without sight |
 | Magenta sphere + circle | Search centre and current search radius |

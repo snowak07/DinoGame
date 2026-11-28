@@ -15,9 +15,17 @@ namespace
 
 	TAutoConsoleVariable<float> CVarLandingRange(TEXT("dino.Noise.LandingRange"), 1000.0f,
 		TEXT("How far (cm) landing from a jump or a fall carries to a creature. Default 1000 (10 m). Host."));
+
+	TAutoConsoleVariable<float> CVarBushCheckSeconds(TEXT("dino.Bush.CheckSeconds"), 1.5f,
+		TEXT("How long (s) a searching creature stops at a bush to check it; whoever is still inside at the end is found. Default 1.5. Host."));
+
+	TAutoConsoleVariable<float> CVarTouchDistance(TEXT("dino.Bush.TouchDistance"), 15.0f,
+		TEXT("Bodies this close (cm, edge to edge) are touching: a creature finds a player it bumps into, bush or not. Default 15. Host."));
 }
 
 float DinoStealth::CrouchSightFactor()      { return CVarCrouchSightFactor.GetValueOnGameThread(); }
 float DinoStealth::CrouchCloseSenseFactor() { return CVarCrouchCloseSenseFactor.GetValueOnGameThread(); }
 float DinoStealth::FootstepRange()          { return CVarFootstepRange.GetValueOnGameThread(); }
 float DinoStealth::LandingRange()           { return CVarLandingRange.GetValueOnGameThread(); }
+float DinoStealth::BushCheckSeconds()       { return FMath::Max(0.0f, CVarBushCheckSeconds.GetValueOnGameThread()); }
+float DinoStealth::TouchDistance()          { return FMath::Max(0.0f, CVarTouchDistance.GetValueOnGameThread()); }

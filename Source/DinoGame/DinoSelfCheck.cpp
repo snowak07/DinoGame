@@ -3,6 +3,7 @@
 #include "AI/DinoAIControllerBase.h"
 #include "AI/DinoAttackComponent.h"
 #include "AI/DinoCreature.h"
+#include "AI/DinoNavAreas.h"
 #include "Components/AudioComponent.h"
 #include "DinoCharacter.h"
 #include "EngineUtils.h"
@@ -14,7 +15,10 @@
 #include "DinoPlayerController.h"
 #include "DinoPlayerState.h"
 #include "Engine/GameInstance.h"
+#include "Engine/OverlapResult.h"
 #include "Engine/World.h"
+#include "NavigationSystem.h"
+#include "NavMesh/RecastNavMesh.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/GameModeBase.h"
 #include "GameFramework/GameSession.h"
@@ -22,6 +26,7 @@
 #include "Online/DinoVoiceRules.h"
 #include "Online/DinoVoiceSubsystem.h"
 #include "Online/DinoVoiceTalker.h"
+#include "World/DinoBush.h"
 
 namespace
 {
@@ -465,6 +470,189 @@ namespace
 		}
 	}
 
+	/**
+	 * Every bush hides players and lets everyone through (ADinoBush::DescribeSetupProblem). Bushes
+	 * are set up in the editor, one Blueprint for all of them, so one wrong setting breaks them all
+	 * at once - and a bush that hides nobody looks exactly like one that does.
+	 */
+	void CheckNavmeshUnderBushes(TArray<FResult>& Out, UWorld& World);
+
+	void CheckBushes(TArray<FResult>& Out, UWorld& World)
+	{
+		int32 Count = 0;
+		TArray<FString> Problems;
+		for (TActorIterator<ADinoBush> It(&World); It; ++It)
+		{
+			++Count;
+			const FString Problem = It->DescribeSetupProblem();
+			if (!Problem.IsEmpty() && Problems.Num() < 5)
+			{
+				Problems.Add(FString::Printf(TEXT("%s: %s"), *It->GetName(), *Problem));
+			}
+		}
+
+		if (Count == 0)
+		{
+			Skip(Out, TEXT("Bushes set up"), TEXT("no bushes (ADinoBush) in this map - is BP_Bush's parent class DinoBush?"));
+			return;
+		}
+		Add(Out, Problems.IsEmpty(), TEXT("Bushes set up"), Problems.IsEmpty()
+			? FString::Printf(TEXT("%d bushes; all hide players and let creatures through"), Count)
+			: FString::Join(Problems, TEXT("; ")));
+
+		CheckNavmeshUnderBushes(Out, World);
+	}
+
+	/**
+	 * Something solid, other than the bush itself, close enough to its middle that the navmesh
+	 * would keep a creature of this navmesh's size out of it anyway - or empty if nothing is. Looks
+	 * for what the navmesh is built from: navigation-relevant collision above step height.
+	 */
+	FString FindObstacleAtBushMiddle(UWorld& World, const ADinoBush& Bush, const ARecastNavMesh& NavMesh)
+	{
+		const FBox Leaves = Bush.GetLeavesBox();
+		const FVector Centre = Bush.GetCentre();
+
+		// The ground under the middle: the leaves' bottom may be sunk into it or float above it.
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(DinoSelfCheckBushGround), false, &Bush);
+		FHitResult Ground;
+		const bool bGround = World.LineTraceSingleByObjectType(Ground, Centre, FVector(Centre.X, Centre.Y, Leaves.Min.Z - 300.0f),
+			FCollisionObjectQueryParams(ECC_WorldStatic), Params);
+		const float GroundZ = bGround ? Ground.ImpactPoint.Z : Leaves.Min.Z;
+		if (bGround && Ground.GetActor())
+		{
+			Params.AddIgnoredActor(Ground.GetActor());
+		}
+
+		// A creature-sized body standing there, its feet lifted over what it could step onto. A
+		// little wider than the creature, for the navmesh's cell rounding.
+		const float Radius = NavMesh.AgentRadius + 15.0f;
+		const float HalfHeight = FMath::Max(NavMesh.AgentHeight * 0.5f, Radius);
+		const float Step = NavMesh.GetAgentMaxStepHeight(ENavigationDataResolution::Default);
+		const FVector Body(Centre.X, Centre.Y, GroundZ + Step + HalfHeight + 5.0f);
+
+		FCollisionObjectQueryParams Objects;
+		Objects.AddObjectTypesToQuery(ECC_WorldStatic);
+		Objects.AddObjectTypesToQuery(ECC_WorldDynamic);
+		TArray<FOverlapResult> Overlaps;
+		World.OverlapMultiByObjectType(Overlaps, Body, FQuat::Identity, Objects, FCollisionShape::MakeCapsule(Radius, HalfHeight), Params);
+		for (const FOverlapResult& Overlap : Overlaps)
+		{
+			const UPrimitiveComponent* Component = Overlap.GetComponent();
+			const AActor* Owner = Overlap.GetActor();
+			if (!Component || !Owner || Owner->IsA<ADinoBush>() || Owner->IsA<APawn>()
+				|| !Component->CanEverAffectNavigation() || !Component->IsNavigationRelevant())
+			{
+				continue;
+			}
+			return FString::Printf(TEXT("%s (%s)"), *Owner->GetActorNameOrLabel(), *Component->GetName());
+		}
+		return FString();
+	}
+
+	/**
+	 * The navmesh itself, measured, rather than the leaves' settings: a creature must be able to
+	 * walk into a bush (to chase through it, or to find who is in it by walking in). A bush with
+	 * navmesh all around it and none under its middle has cut a hole. Searches once stopped ~1.8 m
+	 * from every player in a bush, which is a bush's radius plus a raptor's.
+	 *
+	 * Not every such bush is at fault: the navmesh keeps a creature's radius clear of anything solid
+	 * (60 cm for a raptor, 140 for the T-Rex), so a bush whose middle is that close to a tree trunk
+	 * has no navmesh there however it is set up. Those are named with what is in the way, and pass.
+	 */
+	void CheckNavmeshUnderBushes(TArray<FResult>& Out, UWorld& World)
+	{
+		UNavigationSystemV1* Nav = FNavigationSystem::GetCurrent<UNavigationSystemV1>(&World);
+		if (!Nav)
+		{
+			return;
+		}
+		if (Nav->IsNavigationBuildInProgress())
+		{
+			Skip(Out, TEXT("Navmesh under bushes"), TEXT("the navmesh is still building - measured at the next check"));
+			return;
+		}
+
+		for (const ANavigationData* Data : Nav->NavDataSet)
+		{
+			const ARecastNavMesh* NavMesh = Cast<ARecastNavMesh>(Data);
+			if (!NavMesh)
+			{
+				continue;
+			}
+
+			int32 Bushes = 0, Covered = 0, Foliage = 0, HoleCount = 0, CrowdedCount = 0;
+			TArray<FString> Holes, Crowded;
+			for (TActorIterator<ADinoBush> It(&World); It; ++It)
+			{
+				++Bushes;
+
+				// Straight down from the middle, a little either side; the leaves' height plus
+				// room for the ground below them.
+				const FVector Extent(20.0f, 20.0f, It->GetRadius() + 300.0f);
+				FNavLocation Under;
+				if (NavMesh->ProjectPoint(It->GetCentre(), Under, Extent))
+				{
+					++Covered;
+					const UClass* Area = NavMesh->GetAreaClass(NavMesh->GetPolyAreaID(Under.NodeRef));
+					if (Area && Area->IsChildOf(UDinoNavArea_Foliage::StaticClass()))
+					{
+						++Foliage;
+					}
+					continue;
+				}
+
+				// None under the middle. Navmesh just outside the bush on any side means the bush
+				// is the gap; none anywhere means the ground there is simply not walkable.
+				const float Ring = It->GetRadius() + NavMesh->AgentRadius + 50.0f;
+				bool bAround = false;
+				for (int32 Side = 0; Side < 4 && !bAround; ++Side)
+				{
+					const FVector Offset = FRotator(0.0f, Side * 90.0f, 0.0f).RotateVector(FVector(Ring, 0.0f, 0.0f));
+					FNavLocation Outside;
+					bAround = NavMesh->ProjectPoint(It->GetCentre() + Offset, Outside, Extent);
+				}
+				if (!bAround)
+				{
+					continue;
+				}
+				const FString Obstacle = FindObstacleAtBushMiddle(World, **It, *NavMesh);
+				const FString Where = FString::Printf(TEXT("%s at (%.0f, %.0f)"), *It->GetName(), It->GetCentre().X, It->GetCentre().Y);
+				if (!Obstacle.IsEmpty())
+				{
+					++CrowdedCount;
+					if (Crowded.Num() < 5)
+					{
+						Crowded.Add(FString::Printf(TEXT("%s, next to %s"), *Where, *Obstacle));
+					}
+					continue;
+				}
+				++HoleCount;
+				if (Holes.Num() < 5)
+				{
+					Holes.Add(Where);
+				}
+			}
+
+			if (Bushes == 0)
+			{
+				return;
+			}
+			const FString Name = FString::Printf(TEXT("Navmesh under bushes: %s"), *NavMesh->GetConfig().Name.ToString());
+			FString Measured = FString::Printf(TEXT("navmesh under %d of %d bushes' middles, %d of those marked as foliage"),
+				Covered, Bushes, Foliage);
+			if (CrowdedCount > 0)
+			{
+				Measured += FString::Printf(TEXT("; %d too close to something solid for a %s to stand in the middle (the navmesh keeps %.0f cm clear of obstacles - not the bush's doing; move the bush if it matters): %s"),
+					CrowdedCount, *NavMesh->GetConfig().Name.ToString(), NavMesh->AgentRadius, *FString::Join(Crowded, TEXT("; ")));
+			}
+			Add(Out, Holes.IsEmpty(), Name, Holes.IsEmpty()
+				? Measured
+				: FString::Printf(TEXT("%s; %d bush(es) cut a hole, e.g. %s (navmesh all around, none in the middle - creatures cannot walk in). The navmesh saved with the map is stale: in the editor, Build > Build Paths, then Save All"),
+					*Measured, HoleCount, *FString::Join(Holes, TEXT(", "))));
+		}
+	}
+
 	/** This player is either in a living body or watching through a spectator camera. */
 	void CheckMyView(TArray<FResult>& Out, const ADinoGameState& GameState, const APlayerController& Local)
 	{
@@ -519,6 +707,7 @@ TArray<DinoSelfCheck::FResult> DinoSelfCheck::Run(APlayerController* LocalContro
 		CheckRoundState(Results, *World, *GameState);
 		CheckCreatureTargets(Results, *World);
 		CheckRestraints(Results, *World);
+		CheckBushes(Results, *World);
 	}
 
 	// A missing or lost mic is the machine, not the code - noted, not failed.

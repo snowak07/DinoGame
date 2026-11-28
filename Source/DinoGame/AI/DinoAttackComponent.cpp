@@ -288,18 +288,11 @@ bool UDinoAttackComponent::IsValidVictim(const ADinoCharacter* Victim) const
 
 bool UDinoAttackComponent::HasClearLineTo(const AActor* Other) const
 {
+	// The controller's, so a bush this creature found its victim in does not stop the attack
+	// (ADinoAIControllerBase::IgnoreBushFoundIn).
 	const ADinoCreature* Creature = GetCreature();
-	const UWorld* World = GetWorld();
-	if (!Creature || !Other || !World)
-	{
-		return false;
-	}
-
-	FCollisionQueryParams Params(SCENE_QUERY_STAT(DinoAttackLineOfSight), false, Creature);
-	Params.AddIgnoredActor(Other);
-
-	return !World->LineTraceTestByChannel(
-		Creature->GetPawnViewLocation(), Other->GetActorLocation(), ECC_Visibility, Params);
+	const ADinoAIControllerBase* AI = GetAIController();
+	return Creature && AI && AI->HasClearLineTo(Creature->GetPawnViewLocation(), Other);
 }
 
 void UDinoAttackComponent::DealDamage(ADinoCharacter* Victim, float Amount, const FVector& FromDirection) const

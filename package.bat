@@ -6,8 +6,13 @@ REM   package.bat            build and package only
 REM   package.bat deploy     build, package, and copy to the test PC (deploy.bat)
 REM   package.bat publish    build, package, and upload to itch
 REM
-REM Close the Unreal editor and every running DinoGame.exe before running this.
-REM Both lock files this needs to overwrite.
+REM Close every running DinoGame.exe before running this: it locks the exe this overwrites.
+REM
+REM The editor can stay open, as long as everything is saved: the cook reads assets from
+REM disk, so unsaved changes are not packaged. What the editor blocks is compiling its own
+REM DLL (Live Coding holds it), and the build tool refuses only when something there needs
+REM compiling - after a C++ change the editor has not been restarted on. Then step 1 fails
+REM and says so: close the editor, run again, and reopen it on the new code.
 REM
 REM The unit tests run after the editor build and before the cook, and a failure stops
 REM the package: no playtest build ships with a known regression. Tools/run_tests.py.
@@ -41,10 +46,12 @@ if not errorlevel 1 (
     echo ERROR: DinoGame.exe is running. Close it first.
     exit /b 1
 )
+set EDITOR_OPEN=0
 tasklist /FI "IMAGENAME eq UnrealEditor.exe" 2>nul | find /I "UnrealEditor.exe" >nul
-if not errorlevel 1 (
-    echo ERROR: The Unreal editor is running. Close it first.
-    exit /b 1
+if not errorlevel 1 set EDITOR_OPEN=1
+if "%EDITOR_OPEN%"=="1" (
+    echo NOTE: The Unreal editor is open. Unsaved changes in it will NOT be packaged -
+    echo       File, Save All first. Continuing.
 )
 
 REM Fail before a 10-minute build rather than after it.
@@ -86,7 +93,14 @@ echo Build version: %GITVER%
 echo.
 echo === [1/4] Editor target (needed for a correct cook) ===
 call "%UE%\Engine\Build\BatchFiles\Build.bat" DinoGameEditor Win64 Development -Project="%PROJ%" -WaitMutex
-if errorlevel 1 goto :fail
+if errorlevel 1 (
+    if "%EDITOR_OPEN%"=="1" (
+        echo.
+        echo The editor's C++ is out of date and the open editor blocks rebuilding it.
+        echo Close the editor, run this again, and reopen the editor afterwards.
+    )
+    goto :fail
+)
 
 echo.
 echo === [2/4] Unit tests ===

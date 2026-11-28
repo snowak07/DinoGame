@@ -9,6 +9,7 @@
 #include "DrawDebugHelpers.h"
 #include "NavigationInvokerComponent.h"
 #include "Net/UnrealNetwork.h"
+#include "World/DinoBush.h"
 
 static TAutoConsoleVariable<int32> CVarDinoAIDebugDraw(
 	TEXT("DinoAI.DebugDraw"),
@@ -403,6 +404,19 @@ void ADinoCreature::DrawStateDebug()
 			if (IsDrawable(Next) && !Next.Equals(Active, 1.0f))
 			{
 				DrawDebugSphere(World, Next, 40.0f, 8, FColor(110, 110, 110), false, DebugDrawLifetime, 0, 1.5f);
+			}
+
+			// The bush it is going to check (thin green ring) or checking now (thick, with a label).
+			if (const ADinoBush* Bush = AI->GetBushBeingChecked())
+			{
+				const bool bChecking = AI->IsCheckingBush();
+				DrawDebugCircle(World, Bush->GetCentre(), Bush->GetRadius() + 20.0f, 32, FColor(60, 200, 60), false,
+					DebugDrawLifetime, 0, bChecking ? 6.0f : 2.0f, FVector::ForwardVector, FVector::RightVector, false);
+				if (bChecking)
+				{
+					DrawDebugString(World, Bush->GetCentre() + FVector(0.0f, 0.0f, Bush->GetRadius() + 40.0f),
+						TEXT("checking bush"), nullptr, FColor(60, 200, 60), DebugDrawLifetime);
+				}
 			}
 		}
 		else if (Awareness == EDinoAwareness::Hunting && AI->GetCurrentTarget())

@@ -70,4 +70,72 @@ namespace DinoTargetRules
 	{
 		return !bHunting && !bAttacking;
 	}
+
+	/**
+	 * Two bodies this close, capsule edge to edge and flat, are touching: one bumped into the other.
+	 */
+	inline bool IsTouching(float EdgeDistance, float TouchDistance)
+	{
+		return EdgeDistance <= TouchDistance;
+	}
+
+	/**
+	 * Whether a creature finds a player hiding in a bush. From outside, a bush blocks sight, the
+	 * close sense and half of any noise; these are the ways past it - bumping into them, walking
+	 * into the bush they are in, or stopping to check that bush (a search step). Always found,
+	 * never a chance: the counterplay is not letting it get that close.
+	 */
+	inline bool FindsHiddenPlayer(bool bTouching, bool bInSameBush, bool bCheckedTheirBush)
+	{
+		return bTouching || bInSameBush || bCheckedTheirBush;
+	}
+
+	/**
+	 * Whether a searching creature's next leg checks a bush instead of walking to its next search
+	 * point.
+	 *
+	 * A spot inside a bush is always checked from its edge: walking in would find whoever is there
+	 * with no warning. Otherwise a bush in the search area is checked every other leg, so a search
+	 * still covers the open ground between bushes - and never in place of a freshly investigated
+	 * spot, which comes first.
+	 */
+	inline bool ShouldCheckBushNext(bool bDestinationInUncheckedBush, bool bInvestigationPending,
+		bool bUncheckedBushInRange, bool bLastLegCheckedBush)
+	{
+		if (bDestinationInUncheckedBush)
+		{
+			return true;
+		}
+		return !bInvestigationPending && bUncheckedBushInRange && !bLastLegCheckedBush;
+	}
+
+	/**
+	 * Whether a noise lets a creature carry on checking a bush (or walking to check it) rather
+	 * than redirecting its search. A noise from that same bush is what it is already doing. Left
+	 * to redirect, a player talking in their bush cancelled the very check that would have found
+	 * them. A forced investigation (a flare hit) always redirects.
+	 */
+	inline bool NoiseKeepsBushCheck(bool bBusyWithBush, bool bForced, bool bNoiseFromThatBush)
+	{
+		return bBusyWithBush && !bForced && bNoiseFromThatBush;
+	}
+
+	/**
+	 * Whether a bush counts as checked. Only a check that ran to the end, or one the creature could
+	 * not get to (so it does not keep trying): an interrupted check saw nothing.
+	 */
+	inline bool CountsAsChecked(bool bCheckFinished, bool bCouldNotReach)
+	{
+		return bCheckFinished || bCouldNotReach;
+	}
+
+	/**
+	 * Whether a noise from a bush already checked this search makes it worth checking again. It
+	 * was empty then; a player may have crept in since. Not when the creature already found the
+	 * one making the noise there - it knows, and is coming.
+	 */
+	inline bool NoiseReopensBush(bool bBushChecked, bool bFoundThemThere)
+	{
+		return bBushChecked && !bFoundThemThere;
+	}
 }

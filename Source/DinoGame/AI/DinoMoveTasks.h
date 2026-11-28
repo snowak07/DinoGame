@@ -85,8 +85,14 @@ struct DINOGAME_API FDinoSearchStepTask : public FStateTreeMoveToTask
 
 	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
 
-	/** Counts ticks on the controller, so "is this task ticking at all" is directly observable. */
+	/**
+	 * Counts ticks on the controller, so "is this task ticking at all" is directly observable.
+	 * During a bush check, runs the check instead of the move.
+	 */
 	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const override;
+
+	/** Cancels a bush check the state is left in the middle of. */
+	virtual void ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
 
 	/**
 	 * Forces ticking on.

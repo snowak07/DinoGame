@@ -62,6 +62,17 @@ public class DinoGame : ModuleRules
 		// ExternalDependencies is what makes this reliable: without it UBT reuses a cached
 		// makefile, never re-evaluates this file, and every package would ship whatever
 		// version happened to be compiled in first.
+		//
+		// Game targets only. The define is module-wide, so a new version recompiles the whole
+		// module; stamped into the editor target too, every commit made the editor DLL out of
+		// date, and Live Coding refuses to build it while the editor is open. Unstamped, the
+		// editor build stays up to date and package.bat can run with the editor open. The
+		// editor shows "unknown", which is what an unstamped build already shows.
+		if (Target.Type == TargetType.Editor)
+		{
+			return;
+		}
+
 		string VersionFile = Path.GetFullPath(Path.Combine(ModuleDirectory, "..", "..", "Build", "DinoBuildVersion.txt"));
 		ExternalDependencies.Add(VersionFile);
 

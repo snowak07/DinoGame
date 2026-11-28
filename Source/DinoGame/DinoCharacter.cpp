@@ -31,6 +31,7 @@
 #include "InputAction.h"
 #include "InputMappingContext.h"
 #include "Weapons/DinoFlareGunComponent.h"
+#include "World/DinoBush.h"
 
 ADinoCharacter::ADinoCharacter()
 {
@@ -298,13 +299,14 @@ UAISense_Sight::EVisibilityResult ADinoCharacter::CanBeSeenFrom(const FCanBeSeen
 	}
 
 	const FVector TargetLocation = GetActorLocation();
+	const APawn* Observer = Cast<APawn>(Context.IgnoreActor);
+	const ADinoAIControllerBase* Brain = Observer ? Cast<ADinoAIControllerBase>(Observer->GetController()) : nullptr;
 
 	// Crouched: only the near part of its range. The engine has already checked the full range
 	// and the cone before asking.
 	if (bIsCrouched)
 	{
-		const APawn* Observer = Cast<APawn>(Context.IgnoreActor);
-		if (const ADinoAIControllerBase* Brain = Observer ? Cast<ADinoAIControllerBase>(Observer->GetController()) : nullptr)
+		if (Brain)
 		{
 			const bool bAlreadySeen = Context.bWasVisible && *Context.bWasVisible;
 			const float Range = DinoTargetRules::StealthRange(Brain->GetSightRange(bAlreadySeen), true, DinoStealth::CrouchSightFactor());
@@ -325,7 +327,14 @@ UAISense_Sight::EVisibilityResult ADinoCharacter::CanBeSeenFrom(const FCanBeSeen
 			: ECC_Visibility;
 	}();
 
-	const FCollisionQueryParams Params(SCENE_QUERY_STAT(AILineOfSight), true, Context.IgnoreActor);
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(AILineOfSight), true, Context.IgnoreActor);
+
+	// A bush this creature has found them in no longer hides them from it - only from the others.
+	if (Brain)
+	{
+		Brain->IgnoreBushFoundIn(Params, this);
+	}
+
 	FHitResult Hit;
 	const bool bHit = World->LineTraceSingleByChannel(Hit, Context.ObserverLocation, TargetLocation, SightChannel, Params);
 	++OutNumberOfLoSChecksPerformed;

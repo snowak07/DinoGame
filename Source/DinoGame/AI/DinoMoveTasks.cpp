@@ -1,6 +1,7 @@
 ﻿#include "AI/DinoMoveTasks.h"
 
 #include "AI/DinoAIControllerBase.h"
+#include "AI/DinoNavAreas.h"
 #include "DinoGame.h"
 #include "StateTreeExecutionContext.h"
 #include "StateTreeLinker.h"
@@ -9,19 +10,20 @@ namespace
 {
 	/**
 	 * The same request the stock Move To builds, from the same node settings, so the chase
-	 * honours whatever is set on the node in the tree. Always aimed at an actor, so path
-	 * following re-plans as the target moves.
+	 * honours whatever is set on the node in the tree - except the path filter, which is always
+	 * the chase's own. Always aimed at an actor, so path following re-plans as the target moves.
 	 */
-	FAIMoveRequest MakeChaseRequest(const FStateTreeMoveToTaskInstanceData& Settings,
-		const ADinoAIControllerBase& Controller, AActor* Target)
+	FAIMoveRequest MakeChaseRequest(const FStateTreeMoveToTaskInstanceData& Settings, AActor* Target)
 	{
 		// Partial paths, and an end allowed off the navmesh, whatever the node says: the stock
 		// defaults (end must be navigable) mean a player standing anywhere this creature cannot -
 		// a gap between bushes, a ledge, a nook - gets no path at all, and the creature stood
 		// still ten metres away re-asking. With these, the path runs to the closest point it can
 		// reach, and it waits there.
+		// Bushes cost the same as open ground, whatever the node's filter: a creature hunting
+		// someone it can see goes straight through after them (UDinoNavArea_Foliage).
 		FAIMoveRequest Request;
-		Request.SetNavigationFilter(Settings.FilterClass ? Settings.FilterClass : Controller.GetDefaultNavigationFilterClass())
+		Request.SetNavigationFilter(UDinoNavFilter_Chase::StaticClass())
 			.SetAllowPartialPath(true)
 			.SetAcceptanceRadius(Settings.AcceptableRadius)
 			.SetCanStrafe(Settings.bAllowStrafe)
@@ -57,7 +59,7 @@ EStateTreeRunStatus FDinoMoveToTargetTask::EnterState(FStateTreeExecutionContext
 	if (AActor* Target = Controller->GetCurrentTarget())
 	{
 		InstanceData.TargetActor = Target;
-		Controller->MaintainChase(MakeChaseRequest(InstanceData, *Controller, Target), /*bForceNewMove*/ true);
+		Controller->MaintainChase(MakeChaseRequest(InstanceData, Target), /*bForceNewMove*/ true);
 	}
 
 	return EStateTreeRunStatus::Running;
@@ -78,7 +80,7 @@ EStateTreeRunStatus FDinoMoveToTargetTask::Tick(FStateTreeExecutionContext& Cont
 
 			// Cheap when nothing needs doing: the controller only issues a move when the last
 			// one has ended or the target has changed.
-			Controller->MaintainChase(MakeChaseRequest(InstanceData, *Controller, Target), /*bForceNewMove*/ false);
+			Controller->MaintainChase(MakeChaseRequest(InstanceData, Target), /*bForceNewMove*/ false);
 		}
 	}
 
@@ -136,8 +138,18 @@ EStateTreeRunStatus FDinoSearchStepTask::EnterState(FStateTreeExecutionContext& 
 		return EStateTreeRunStatus::Failed;
 	}
 
+	// The last leg walked to a bush: this step checks it, standing still, instead of a leg. No
+	// move is started, so Tick runs the check and the stock move task stays out of it.
+	if (Controller->BeginBushCheckIfArrived())
+	{
+		return EStateTreeRunStatus::Running;
+	}
+
 	InstanceData.TargetActor = nullptr;
 	InstanceData.Destination = Controller->GetNextSearchPoint();
+
+	// A spot inside a bush, or a bush near the search, is checked from its edge instead.
+	Controller->ChooseBushToCheck(InstanceData.Destination);
 
 	// As close as it can get. Whatever chose the spot - a noise, a player felt up close, where
 	// one was last seen, the search query - it can be somewhere this creature cannot stand, and a
@@ -198,10 +210,32 @@ EStateTreeRunStatus FDinoSearchStepTask::Tick(FStateTreeExecutionContext& Contex
 {
 	FInstanceDataType& InstanceData = Context.GetInstanceData(*this);
 
-	if (ADinoAIControllerBase* Controller = Cast<ADinoAIControllerBase>(InstanceData.AIController))
+	ADinoAIControllerBase* Controller = Cast<ADinoAIControllerBase>(InstanceData.AIController);
+	if (Controller)
 	{
 		Controller->NotifySearchTick();
+
+		// Not Super::Tick during a check: no move task is running, and Super reports that as Failed.
+		if (Controller->IsCheckingBush())
+		{
+			return Controller->TickBushCheck() ? EStateTreeRunStatus::Running : EStateTreeRunStatus::Succeeded;
+		}
 	}
 
 	return Super::Tick(Context, DeltaTime);
+}
+
+void FDinoSearchStepTask::ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
+{
+	// Left mid-check - it spotted someone, or gave up. A walk to a bush is left alone: the step
+	// ends with every leg, and the next one is what checks it.
+	if (ADinoAIControllerBase* Controller = Cast<ADinoAIControllerBase>(Context.GetInstanceData(*this).AIController))
+	{
+		if (Controller->IsCheckingBush())
+		{
+			Controller->CancelBushCheck(TEXT("left the search step"));
+		}
+	}
+
+	Super::ExitState(Context, Transition);
 }

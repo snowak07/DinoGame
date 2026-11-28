@@ -22,6 +22,8 @@ public class DinoGameTests : ModuleRules
 			"AudioMixer",
 			// IVoiceCapture, which the engine's voice-engine header needs, for the talking-quirk test.
 			"Voice",
+			// The creatures' foliage nav area and chase filter, for the bush tests.
+			"NavigationSystem",
 			"DinoGame"
 		});
 	}
